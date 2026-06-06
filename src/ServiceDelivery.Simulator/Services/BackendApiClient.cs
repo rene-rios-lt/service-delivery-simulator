@@ -6,7 +6,7 @@ namespace ServiceDelivery.Simulator.Services;
 
 // Wraps all HTTP calls to the backend API.
 // Handles authentication (login → JWT) and vehicle position updates.
-public sealed class BackendApiClient
+public sealed class BackendApiClient : IBackendApiClient
 {
     private readonly HttpClient _httpClient;
     private readonly SimulatorOptions _options;

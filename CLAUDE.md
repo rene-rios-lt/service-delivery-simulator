@@ -86,10 +86,31 @@ Refactor → Clean up without breaking the tests
 
 Test naming convention: `GivenAVehicleWorker_WhenAssignedAJob_ThenItNavigatesToRequesterLocation`
 
+### Test Structure — Arrange / Act / Assert
+
+Every test must have clearly separated sections:
+
+```csharp
+[Fact]
+public void GivenAVehicleWorker_WhenJobAccepted_ThenNavigationDeviatesFromLoop()
+{
+    // Arrange
+    var apiClient = new Mock<IBackendApiClient>();
+    var worker = new VehicleWorker(0, apiClient.Object, NullLogger<VehicleWorker>.Instance);
+
+    // Act
+    worker.AssignJob(new JobAssignment(...));
+
+    // Assert
+    Assert.True(worker.HasActiveJob);
+}
+```
+
 ## SOLID Principles
 
 Apply SOLID within the single project:
 - **S** — `VehicleWorker` moves vehicles; `BackendApiClient` handles HTTP; `SignalRClient` handles real-time. No class does more than one thing.
 - **O** — Add new behaviors (e.g. more realistic routing) by extending, not modifying existing workers/services.
-- **I** — Define interfaces for `BackendApiClient` and `SignalRClient` so `VehicleWorker` can be tested with mocks.
-- **D** — `VehicleWorker` depends on interfaces, not concrete implementations. Register concretes in `Program.cs`.
+- **L** — `BackendApiClient` and `SignalRClient` must fully implement their interfaces — no `NotImplementedException`, no silent no-ops. If a method is not yet implemented, leave a `TODO` comment but do not ship a broken contract.
+- **I** — `IBackendApiClient` and `ISignalRClient` are defined in `Services/` so `VehicleWorker` depends only on the operations it needs.
+- **D** — `VehicleWorker` depends on `IBackendApiClient` and `ISignalRClient`, not on concrete implementations. Register concretes in `Program.cs`.

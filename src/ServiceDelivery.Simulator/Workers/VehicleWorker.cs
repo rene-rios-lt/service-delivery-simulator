@@ -10,10 +10,10 @@ namespace ServiceDelivery.Simulator.Workers;
 public sealed class VehicleWorker : BackgroundService
 {
     private readonly int _vehicleIndex;
-    private readonly BackendApiClient _apiClient;
+    private readonly IBackendApiClient _apiClient;
     private readonly ILogger<VehicleWorker> _logger;
 
-    public VehicleWorker(int vehicleIndex, BackendApiClient apiClient, ILogger<VehicleWorker> logger)
+    public VehicleWorker(int vehicleIndex, IBackendApiClient apiClient, ILogger<VehicleWorker> logger)
     {
         _vehicleIndex = vehicleIndex;
         _apiClient = apiClient;

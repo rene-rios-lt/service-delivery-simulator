@@ -8,8 +8,8 @@ var host = Host.CreateDefaultBuilder(args)
         services.Configure<SimulatorOptions>(
             context.Configuration.GetSection(SimulatorOptions.SectionName));
 
-        services.AddHttpClient<BackendApiClient>();
-        services.AddSingleton<SignalRClient>();
+        services.AddHttpClient<IBackendApiClient, BackendApiClient>();
+        services.AddSingleton<ISignalRClient, SignalRClient>();
 
         for (int vehicleIndex = 0; vehicleIndex < 8; vehicleIndex++)
         {
@@ -17,7 +17,7 @@ var host = Host.CreateDefaultBuilder(args)
             services.AddSingleton<IHostedService>(sp =>
                 new VehicleWorker(
                     index,
-                    sp.GetRequiredService<BackendApiClient>(),
+                    sp.GetRequiredService<IBackendApiClient>(),
                     sp.GetRequiredService<ILogger<VehicleWorker>>()));
         }
     })

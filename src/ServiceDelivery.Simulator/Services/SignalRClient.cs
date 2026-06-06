@@ -6,7 +6,7 @@ namespace ServiceDelivery.Simulator.Services;
 
 // Connects to the backend's RepHub to receive job offers for the simulator service account.
 // The simulator auto-accepts (~85%) or auto-declines (~15%) each offer.
-public sealed class SignalRClient : IAsyncDisposable
+public sealed class SignalRClient : ISignalRClient
 {
     private readonly SimulatorOptions _options;
     private HubConnection? _connection;

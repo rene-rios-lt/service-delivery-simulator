@@ -111,6 +111,6 @@ public void GivenAVehicleWorker_WhenJobAccepted_ThenNavigationDeviatesFromLoop()
 Apply SOLID within the single project:
 - **S** — `VehicleWorker` moves vehicles; `BackendApiClient` handles HTTP; `SignalRClient` handles real-time. No class does more than one thing.
 - **O** — Add new behaviors (e.g. more realistic routing) by extending, not modifying existing workers/services.
-- **L** — `BackendApiClient` and `SignalRClient` must fully implement their interfaces — no `NotImplementedException`, no silent no-ops. If a method is not yet implemented, leave a `TODO` comment but do not ship a broken contract.
+- **L** — `BackendApiClient` and `SignalRClient` must fully implement their interfaces — no silent no-ops or partial implementations in production code. During active development, `TODO` comments with `throw new NotImplementedException()` are acceptable scaffolding, but every `NotImplementedException` must be resolved before the simulator can run end-to-end.
 - **I** — `IBackendApiClient` and `ISignalRClient` are defined in `Services/` so `VehicleWorker` depends only on the operations it needs.
 - **D** — `VehicleWorker` depends on `IBackendApiClient` and `ISignalRClient`, not on concrete implementations. Register concretes in `Program.cs`.

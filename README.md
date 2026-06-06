@@ -47,5 +47,5 @@ See [`docs/simulator-spec.md`](docs/simulator-spec.md) for the full specificatio
 | Repo | Purpose |
 |------|---------|
 | [service-delivery-central](https://github.com/rene-rios-lt/service-delivery-central) | Architecture docs, ADRs, orchestration |
-| [service-deliver-backend](https://github.com/rene-rios-lt/service-deliver-backend) | .NET 10 Clean Architecture API |
+| [service-delivery-backend](https://github.com/rene-rios-lt/service-delivery-backend) | .NET 10 Clean Architecture API |
 | [service-delivery-frontend](https://github.com/rene-rios-lt/service-delivery-frontend) | .NET MAUI Blazor Hybrid frontend |

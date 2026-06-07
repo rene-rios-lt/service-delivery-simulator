@@ -50,7 +50,7 @@ Stories are implemented using the Master agent in the central repo. Invoke it wi
 /master SIM-001
 ```
 
-The agent runs the full TDD pipeline (evaluate → plan → implement → review → PR) with two human checkpoints. See [service-delivery-central](https://github.com/rene-rios-lt/service-delivery-central) for the full agent system documentation.
+The agent runs the full TDD pipeline (evaluate → plan → implement → AI review → review → PR) with two human checkpoints. See [service-delivery-central](https://github.com/rene-rios-lt/service-delivery-central) for the full agent system documentation.
 
 ## Related Repos
 

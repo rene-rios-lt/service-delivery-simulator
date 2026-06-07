@@ -48,7 +48,7 @@ Stories for this repo (`SIM-001` through `SIM-007`) are implemented using the Ma
 /master SIM-003
 ```
 
-The agent creates a feature branch, runs the full TDD pipeline (evaluate → plan → implement → AI review → PR), and pauses at two human checkpoints. Never implement a story by writing code directly without the agent — TDD discipline and SOLID checks are enforced through that pipeline.
+The agent creates a feature branch, runs the full TDD pipeline (evaluate → plan → implement → AI review → review → PR), and pauses at two human checkpoints. Never implement a story by writing code directly without the agent — TDD discipline and SOLID checks are enforced through that pipeline.
 
 ### Audit Files (`.stories/`)
 

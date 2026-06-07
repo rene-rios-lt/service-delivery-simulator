@@ -42,6 +42,16 @@ dotnet run --project src/ServiceDelivery.Simulator
 
 See [`docs/simulator-spec.md`](docs/simulator-spec.md) for the full specification.
 
+## Implementing Stories
+
+Stories are implemented using the Master agent in the central repo. Invoke it with a simulator story ID:
+
+```
+/master SIM-001
+```
+
+The agent runs the full TDD pipeline (evaluate → plan → implement → review → PR) with two human checkpoints. See [service-delivery-central](https://github.com/rene-rios-lt/service-delivery-central) for the full agent system documentation.
+
 ## Related Repos
 
 | Repo | Purpose |

@@ -9,7 +9,13 @@ var host = Host.CreateDefaultBuilder(args)
             context.Configuration.GetSection(SimulatorOptions.SectionName));
 
         services.AddHttpClient<IBackendApiClient, BackendApiClient>();
+        services.AddSingleton<IHubConnectionFactory, DefaultHubConnectionFactory>();
         services.AddSingleton<ISignalRClient, SignalRClient>();
+
+        // SimulatorStartupService must be registered first — it authenticates and
+        // connects SignalR before any VehicleWorker begins. Hosted services start
+        // in registration order.
+        services.AddHostedService<SimulatorStartupService>();
 
         for (int vehicleIndex = 0; vehicleIndex < 8; vehicleIndex++)
         {

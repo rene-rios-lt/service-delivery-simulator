@@ -1,7 +1,9 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ServiceDelivery.Simulator.Configuration;
 using ServiceDelivery.Simulator.Models;
@@ -10,23 +12,28 @@ namespace ServiceDelivery.Simulator.Services;
 
 // Wraps all HTTP calls to the backend API.
 // Handles authentication (login → JWT), bearer-header propagation, JWT-expiry
-// re-authentication, and vehicle position updates.
+// re-authentication, 401-retry logic, and vehicle position updates.
 public sealed class BackendApiClient : IBackendApiClient
 {
     private const int ReAuthBufferSeconds = 30;
 
     private readonly HttpClient _httpClient;
     private readonly SimulatorOptions _options;
+    private readonly ILogger<BackendApiClient> _logger;
     private string? _jwt;
     private DateTime _jwtExpiry = DateTime.MinValue;
 
     // Exposed for test inspection — allows asserting the JWT was received and stored.
     public string? StoredJwt => _jwt;
 
-    public BackendApiClient(HttpClient httpClient, IOptions<SimulatorOptions> options)
+    public BackendApiClient(
+        HttpClient httpClient,
+        IOptions<SimulatorOptions> options,
+        ILogger<BackendApiClient> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
+        _logger = logger;
         _httpClient.BaseAddress = new Uri(_options.BackendBaseUrl);
     }
 
@@ -53,10 +60,25 @@ public sealed class BackendApiClient : IBackendApiClient
     public async Task PostPositionAsync(VehiclePosition position, CancellationToken cancellationToken)
     {
         await EnsureAuthenticatedAsync(cancellationToken);
-        await _httpClient.PostAsJsonAsync(
+        var response = await _httpClient.PostAsJsonAsync(
             $"/vehicles/{position.VehicleId}/position",
             new { position.Latitude, position.Longitude },
             cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            await AuthenticateAsync(cancellationToken);
+            var retryResponse = await _httpClient.PostAsJsonAsync(
+                $"/vehicles/{position.VehicleId}/position",
+                new { position.Latitude, position.Longitude },
+                cancellationToken);
+
+            if (!retryResponse.IsSuccessStatusCode)
+                _logger.LogError(
+                    "POST /vehicles/{VehicleId}/position returned {StatusCode} after re-authentication.",
+                    position.VehicleId,
+                    retryResponse.StatusCode);
+        }
     }
 
     public async Task AcceptJobOfferAsync(string offerId, CancellationToken cancellationToken)

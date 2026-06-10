@@ -114,6 +114,71 @@ public class VehicleWorkerRouteTests
         Assert.Equal(firstWaypoint.Longitude, capturedPosition.Longitude);
     }
 
+    // ─── AC-1 (SIM-004): POST /vehicles/{id}/position called with correct payload ─
+
+    [Fact]
+    public async Task GivenAVehicleAtCurrentPosition_WhenTickExecutes_ThenPostPositionAsyncCalledWithCorrectPayload()
+    {
+        // Arrange
+        var route = BuildTestRoute();
+        VehiclePosition? capturedPosition = null;
+        var callCount = 0;
+
+        var apiClientMock = new Mock<IBackendApiClient>();
+        apiClientMock
+            .Setup(c => c.PostPositionAsync(It.IsAny<VehiclePosition>(), It.IsAny<CancellationToken>()))
+            .Callback<VehiclePosition, CancellationToken>((pos, _) =>
+            {
+                capturedPosition = pos;
+                callCount++;
+            })
+            .Returns(Task.CompletedTask);
+
+        var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
+
+        // Act
+        await worker.TickAsync(CancellationToken.None);
+
+        // Assert
+        Assert.Equal(1, callCount);
+        Assert.NotNull(capturedPosition);
+        Assert.Equal(route.VehicleId, capturedPosition!.VehicleId);
+        Assert.Equal(route.Waypoints[1].Latitude, capturedPosition.Latitude);
+        Assert.Equal(route.Waypoints[1].Longitude, capturedPosition.Longitude);
+    }
+
+    // ─── AC-4 (SIM-004): Transient network failure is caught, logged, worker continues ─
+
+    [Fact]
+    public async Task GivenPostPositionThrowsNetworkException_WhenTickExecutes_ThenWorkerCatchesAndContinues()
+    {
+        // Arrange
+        var route = BuildTestRoute();
+        var loggerMock = new Mock<ILogger<VehicleWorker>>();
+
+        var apiClientMock = new Mock<IBackendApiClient>();
+        apiClientMock
+            .Setup(c => c.PostPositionAsync(It.IsAny<VehiclePosition>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new HttpRequestException("Simulated network error"));
+
+        var worker = new VehicleWorker(route, apiClientMock.Object, loggerMock.Object);
+
+        // Act — TickAsync should not throw despite PostPositionAsync throwing
+        var exception = await Record.ExceptionAsync(
+            () => worker.TickAsync(CancellationToken.None));
+
+        // Assert — no exception propagated; error was logged
+        Assert.Null(exception);
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.Is<Exception>(ex => ex is HttpRequestException),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once);
+    }
+
     // ─── AC-5: Cancellation token respected ──────────────────────────────────
 
     [Fact]

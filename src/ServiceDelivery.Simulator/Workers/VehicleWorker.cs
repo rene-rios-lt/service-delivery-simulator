@@ -1,3 +1,4 @@
+using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 
 namespace ServiceDelivery.Simulator.Workers;
@@ -9,25 +10,35 @@ namespace ServiceDelivery.Simulator.Workers;
 // - If assigned a job, deviates from the loop route toward the requester location
 public sealed class VehicleWorker : BackgroundService
 {
-    private readonly int _vehicleIndex;
+    private readonly VehicleRoute _route;
     private readonly IBackendApiClient _apiClient;
     private readonly ILogger<VehicleWorker> _logger;
 
-    public VehicleWorker(int vehicleIndex, IBackendApiClient apiClient, ILogger<VehicleWorker> logger)
+    private int _waypointIndex;
+
+    public VehicleWorker(VehicleRoute route, IBackendApiClient apiClient, ILogger<VehicleWorker> logger)
     {
-        _vehicleIndex = vehicleIndex;
+        _route = route;
         _apiClient = apiClient;
         _logger = logger;
     }
 
+    public async Task TickAsync(CancellationToken cancellationToken)
+    {
+        _waypointIndex = (_waypointIndex + 1) % _route.Waypoints.Count;
+        var waypoint = _route.Waypoints[_waypointIndex];
+        var position = new VehiclePosition(_route.VehicleId, waypoint.Latitude, waypoint.Longitude);
+        await _apiClient.PostPositionAsync(position, cancellationToken);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("VehicleWorker {VehicleIndex} starting", _vehicleIndex);
+        _logger.LogInformation("VehicleWorker {VehicleId} starting", _route.VehicleId);
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            // TODO: Advance position along route waypoints
-            // TODO: Post position update to backend
+            await TickAsync(stoppingToken);
+
             // TODO: Check for pending job offer and accept/decline
             // TODO: If active job, navigate toward requester location instead of looping
 

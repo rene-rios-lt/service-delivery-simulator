@@ -1,4 +1,5 @@
 using ServiceDelivery.Simulator.Configuration;
+using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 using ServiceDelivery.Simulator.Workers;
 
@@ -17,12 +18,12 @@ var host = Host.CreateDefaultBuilder(args)
         // in registration order.
         services.AddHostedService<SimulatorStartupService>();
 
-        for (int vehicleIndex = 0; vehicleIndex < 8; vehicleIndex++)
+        foreach (var route in IowaRoutes.All)
         {
-            var index = vehicleIndex;
+            var capturedRoute = route;
             services.AddSingleton<IHostedService>(sp =>
                 new VehicleWorker(
-                    index,
+                    capturedRoute,
                     sp.GetRequiredService<IBackendApiClient>(),
                     sp.GetRequiredService<ILogger<VehicleWorker>>()));
         }

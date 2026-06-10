@@ -114,15 +114,20 @@ public class SignalRClientTests
             factoryMock.Object,
             NullLogger());
 
-        client.RegisterJobOfferHandler(_ => { });
+        JobOfferPayload? receivedPayload = null;
+        var expectedPayload = new JobOfferPayload(
+            OfferId: "offer-1", RequestId: "req-1", RequesterName: "Alice",
+            RequesterTier: "Gold", DtcTitle: "P0300", Latitude: 41.5, Longitude: -93.5,
+            DistanceMiles: 10.0, EtaMinutes: 15);
+        client.RegisterJobOfferHandler(p => receivedPayload = p);
 
-        // Act — ConnectAsync is called; we assert that no exception is thrown
-        // (the handler is stored internally; real invocation requires a running hub)
-        var exception = await Record.ExceptionAsync(
-            () => client.ConnectAsync("test-jwt", CancellationToken.None));
+        // Act
+        await client.ConnectAsync("test-jwt", CancellationToken.None);
 
-        // Assert — client accepted the handler without error
-        Assert.Null(exception);
+        // Assert — handler is stored and, when invoked, receives the payload
+        Assert.NotNull(client.JobOfferHandlerForTest);
+        client.JobOfferHandlerForTest!(expectedPayload);
+        Assert.Equal(expectedPayload.OfferId, receivedPayload!.OfferId);
     }
 
     // ─── AC-3: Exponential back-off reconnect policy configured ──────────────

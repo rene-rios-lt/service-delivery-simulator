@@ -2,6 +2,8 @@ using System.Net;
 using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
 using Moq.Protected;
@@ -60,7 +62,7 @@ public class BackendApiClientAuthTests
         }
 
         var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(options));
+        var client = new BackendApiClient(httpClient, Options.Create(options), NullLogger<BackendApiClient>.Instance);
         return (client, handlerMock);
     }
 
@@ -216,7 +218,7 @@ public class BackendApiClientAuthTests
             });
 
         var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(DefaultOptions()));
+        var client = new BackendApiClient(httpClient, Options.Create(DefaultOptions()), NullLogger<BackendApiClient>.Instance);
 
         // Perform initial authentication (stores expired JWT)
         await client.AuthenticateAsync(CancellationToken.None);
@@ -260,7 +262,7 @@ public class BackendApiClientAuthTests
             });
 
         var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(DefaultOptions()));
+        var client = new BackendApiClient(httpClient, Options.Create(DefaultOptions()), NullLogger<BackendApiClient>.Instance);
         await client.AuthenticateAsync(CancellationToken.None);
 
         var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
@@ -271,6 +273,96 @@ public class BackendApiClientAuthTests
 
         // Assert — no exception thrown, call completed successfully
         Assert.Null(exception);
+    }
+
+    // ─── AC-3 (SIM-004): 401 on position POST → re-authenticate and retry once ─
+
+    [Fact]
+    public async Task GivenBackendReturns401OnPositionPost_WhenPostPositionAsyncCalled_ThenReAuthenticatesAndRetries()
+    {
+        // Arrange — initial auth succeeds, position POST returns 401, re-auth succeeds, retry succeeds
+        var options = DefaultOptions();
+        var handlerMock = new Mock<HttpMessageHandler>();
+        var callCount = 0;
+
+        handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(() =>
+            {
+                callCount++;
+                return callCount switch
+                {
+                    1 => OkLoginResponse("initial-jwt"),          // initial EnsureAuth
+                    2 => new HttpResponseMessage(HttpStatusCode.Unauthorized), // position POST → 401
+                    3 => OkLoginResponse("refreshed-jwt"),        // re-auth call
+                    4 => OkPositionResponse(),                    // retry POST succeeds
+                    _ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                };
+            });
+
+        var httpClient = new HttpClient(handlerMock.Object);
+        var client = new BackendApiClient(httpClient, Options.Create(options), NullLogger<BackendApiClient>.Instance);
+        var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
+
+        // Act
+        var exception = await Record.ExceptionAsync(
+            () => client.PostPositionAsync(position, CancellationToken.None));
+
+        // Assert — no exception thrown; 4 HTTP calls made (initial auth + POST 401 + re-auth + retry POST)
+        Assert.Null(exception);
+        Assert.Equal(4, callCount);
+    }
+
+    [Fact]
+    public async Task GivenBackendReturns401TwiceOnPositionPost_WhenPostPositionAsyncCalled_ThenLogsErrorAndDoesNotThrow()
+    {
+        // Arrange — initial auth succeeds, position POST returns 401, re-auth succeeds, retry also returns 401
+        var options = DefaultOptions();
+        var handlerMock = new Mock<HttpMessageHandler>();
+        var loggerMock = new Mock<ILogger<BackendApiClient>>();
+        var callCount = 0;
+
+        handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(() =>
+            {
+                callCount++;
+                return callCount switch
+                {
+                    1 => OkLoginResponse("initial-jwt"),          // initial EnsureAuth
+                    2 => new HttpResponseMessage(HttpStatusCode.Unauthorized), // first POST → 401
+                    3 => OkLoginResponse("refreshed-jwt"),        // re-auth call
+                    4 => new HttpResponseMessage(HttpStatusCode.Unauthorized), // retry POST → 401 again
+                    _ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                };
+            });
+
+        var httpClient = new HttpClient(handlerMock.Object);
+        var client = new BackendApiClient(httpClient, Options.Create(options), loggerMock.Object);
+        var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
+
+        // Act
+        var exception = await Record.ExceptionAsync(
+            () => client.PostPositionAsync(position, CancellationToken.None));
+
+        // Assert — no exception thrown; error was logged
+        Assert.Null(exception);
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("position")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
     }
 
     // ─── JWT Test Helpers ─────────────────────────────────────────────────────

@@ -28,7 +28,15 @@ public sealed class VehicleWorker : BackgroundService
         _waypointIndex = (_waypointIndex + 1) % _route.Waypoints.Count;
         var waypoint = _route.Waypoints[_waypointIndex];
         var position = new VehiclePosition(_route.VehicleId, waypoint.Latitude, waypoint.Longitude);
-        await _apiClient.PostPositionAsync(position, cancellationToken);
+
+        try
+        {
+            await _apiClient.PostPositionAsync(position, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to post position for vehicle {VehicleId}. Will retry on next tick.", _route.VehicleId);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

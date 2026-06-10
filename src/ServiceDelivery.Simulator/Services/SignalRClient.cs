@@ -15,6 +15,7 @@ public sealed class SignalRClient : ISignalRClient
     private readonly ILogger<SignalRClient> _logger;
     private HubConnection? _connection;
     private Action<JobOfferPayload>? _jobOfferHandler;
+    internal Action<JobOfferPayload>? JobOfferHandlerForTest => _jobOfferHandler;
 
     public SignalRClient(
         IOptions<SimulatorOptions> options,

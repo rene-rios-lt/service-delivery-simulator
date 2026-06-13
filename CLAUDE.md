@@ -10,13 +10,12 @@ This is the simulator repository for the Service Delivery system. It is a **.NET
 
 The simulator is an **external actor** that calls the backend API the same way a real Telematics integration would. The backend does not know or care whether it is receiving data from the simulator or real hardware. When real Telematics is available, replacing the simulator is a configuration change — not a code change.
 
-The simulator:
-- Authenticates with a pre-seeded service account JWT (same auth as all other users)
-- Drives 8 vehicles along pre-determined route loops across Iowa (statewide)
-- Posts vehicle position updates every **3 seconds** to the backend
-- Connects to the backend's SignalR `RepHub` to receive job offers
-- Auto-accepts ~85% of job offers, auto-declines ~15% (configurable)
-- When a vehicle is assigned a job, it deviates from its loop and navigates toward the requester's location
+The simulator (see central repo ADR-0009 for the "Human Takeover" design):
+- **Dual authentication** — it logs in as the real seeded rep accounts `rep1…rep8` (one session each, using the shared rep password) to make job decisions on their behalf, and holds one `Simulator`-role account used **only** to post vehicle positions for all trucks. There is no longer a single auto-accepting `simulator@system.internal` service account.
+- **Position engine** — drives **every** truck's position from backend job-state and posts updates every **3 seconds** to the backend, regardless of whether a truck is operated by the simulator or by a human who has taken over.
+- **Auto-decision engine** — for the reps it operates (non-human reps only), connects each one's SignalR `RepHub`, auto-accepts ~85% of job offers and declines ~15% (configurable), then auto-arrives, works on-site for a randomized **120–240 seconds**, and auto-completes.
+- **Reconciliation + yield-on-takeover** — each tick it reads current fleet state, operates only the reps no human controls, and rebalances. When a human takes over a rep it yields that rep permanently for the rest of the run (sticky) and never re-assumes it. Abandoned jobs re-match.
+- **Human-truck hold-and-wait** — for a truck a human has taken over, the position engine navigates to the requester after the human Accepts, then holds in place until the human taps Arrived/Complete.
 
 ## Required Reading Before Implementing
 
@@ -75,18 +74,22 @@ Create `src/ServiceDelivery.Simulator/appsettings.Local.json` (gitignored) with 
 {
   "Simulator": {
     "BackendBaseUrl": "https://localhost:5001",
-    "SimulatorPassword": "<simulator account password from backend seed data>"
+    "SimulatorPassword": "<Simulator-role account password from backend seed data — used only to post vehicle positions>",
+    "RepPassword": "<shared password for the seeded rep1…rep8 accounts — used to log in as each rep and make job decisions>"
   }
 }
 ```
 
 ## Key Behaviors
 
-- **Position updates**: Every 3 seconds, each VehicleWorker advances along its Iowa route waypoints and calls `POST /vehicles/{id}/position`
-- **Route loops**: Vehicles traverse ordered waypoint arrays continuously — when the last waypoint is reached, wrap back to the first
-- **Job deviation**: When a job is accepted, the vehicle navigates straight-line toward the requester's lat/lng, then returns to the nearest loop waypoint on completion
-- **Auto-accept/decline**: Random decision per offer using `AutoDeclineRatePercent` — add a 1–5 second delay before responding to simulate a real rep reviewing the offer
-- **Startup sequence**: Authenticate → connect SignalR → start all 8 VehicleWorkers
+See central repo ADR-0009 for the authoritative "Human Takeover" design.
+
+- **Position updates**: Every 3 seconds the position engine drives every truck from backend job-state and calls `POST /vehicles/{id}/position` using the `Simulator`-role account — including trucks a human has taken over. Position is simulator-pushed, not backend-derived.
+- **Route loops**: Idle vehicles traverse ordered Iowa waypoint arrays continuously — when the last waypoint is reached, wrap back to the first
+- **Job deviation**: When a job is in flight, the truck navigates straight-line toward the requester's lat/lng, then returns to the nearest loop waypoint on completion
+- **Auto-decision (non-human reps)**: For each rep the simulator operates, a random decision per offer using `AutoDeclineRatePercent` — add a 1–5 second delay before responding to simulate a real rep reviewing the offer — then auto-arrive, work on-site for a randomized 120–240 seconds, and auto-complete
+- **Reconciliation + yield-on-takeover**: Each tick, read current fleet state and operate only reps no human controls. A rep taken over by a human is yielded permanently for the rest of the run (sticky) and never re-assumed; abandoned jobs re-match. The position engine still drives the human's truck — navigating to the requester after the human Accepts, then holding until the human taps Arrived/Complete
+- **Startup sequence**: Authenticate the `Simulator`-role account and the `rep1…rep8` accounts → connect each operated rep's SignalR `RepHub` → start the position engine and per-rep decision loops
 
 ## Test-Driven Development
 

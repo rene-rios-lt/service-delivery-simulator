@@ -1,6 +1,6 @@
 # Service Delivery Simulator
 
-A .NET 10 Worker Service that drives the Service Delivery POC with realistic vehicle data. It simulates 8 service vehicles traveling across Iowa, posting position updates to the backend API every 3 seconds and auto-responding to job offers.
+A .NET 10 Worker Service that drives the Service Delivery POC with realistic vehicle data. It operates the seeded rep accounts to make job decisions and pushes every truck's position to the backend API every 3 seconds — while letting a human take over any idle vehicle from a device (see central repo ADR-0009, "Human Takeover").
 
 ## Prerequisites
 
@@ -15,7 +15,8 @@ A .NET 10 Worker Service that drives the Service Delivery POC with realistic veh
 {
   "Simulator": {
     "BackendBaseUrl": "https://localhost:5001",
-    "SimulatorPassword": "<simulator account password>"
+    "SimulatorPassword": "<Simulator-role account password — posts vehicle positions>",
+    "RepPassword": "<shared password for rep1…rep8 — logs in as each rep to make job decisions>"
   }
 }
 ```
@@ -34,11 +35,11 @@ dotnet run --project src/ServiceDelivery.Simulator
 
 ## How It Works
 
-- 8 `VehicleWorker` background services run concurrently, one per vehicle
-- Each worker advances its vehicle along a pre-determined Iowa route loop every 3 seconds
-- Position updates are posted to the backend via `POST /vehicles/{id}/position`
-- Job offers arrive over SignalR (`RepHub`) and are auto-accepted (~85%) or declined (~15%)
-- When a vehicle accepts a job, it navigates toward the requester's location and returns to its loop on completion
+- It logs in as the seeded rep accounts `rep1…rep8` (job decisions) and holds one `Simulator`-role account (vehicle positions only) — there is no single auto-accepting service account
+- A position engine drives **every** truck's position from backend job-state and posts it to `POST /vehicles/{id}/position` every 3 seconds
+- For each rep it operates, job offers arrive over SignalR (`RepHub`) and are auto-accepted (~85%) or declined (~15%); accepted jobs auto-arrive, work on-site for a randomized 120–240 seconds, then auto-complete
+- A human can log in as `rep1…rep8` on a device, pick an idle vehicle, and take it over — the simulator yields that rep for the rest of the run and never re-assumes it (abandoned jobs re-match)
+- For a human-operated truck, the position engine still drives it: navigating to the requester after the human Accepts, then holding until the human taps Arrived/Complete
 
 See [`docs/simulator-spec.md`](docs/simulator-spec.md) for the full specification.
 

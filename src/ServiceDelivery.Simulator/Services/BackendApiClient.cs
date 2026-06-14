@@ -1,146 +1,87 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Security.Authentication;
-using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using ServiceDelivery.Simulator.Configuration;
 using ServiceDelivery.Simulator.Models;
 
 namespace ServiceDelivery.Simulator.Services;
 
-// Wraps all HTTP calls to the backend API.
-// Handles authentication (login → JWT), bearer-header propagation, JWT-expiry
-// re-authentication, 401-retry logic, and vehicle position updates.
+// Wraps all HTTP calls to the backend API. Authentication and per-identity token
+// bookkeeping live in IIdentitySessionStore — this client only attaches the right
+// identity's bearer token to each outgoing request:
+//   - position posts use the Simulator identity's token
+//   - accept/decline use the responding rep's token
+// Each request carries its own Authorization header (no shared DefaultRequestHeaders),
+// so the single HttpClient can serve multiple identities concurrently.
 public sealed class BackendApiClient : IBackendApiClient
 {
-    private const int ReAuthBufferSeconds = 30;
-
     private readonly HttpClient _httpClient;
-    private readonly SimulatorOptions _options;
+    private readonly IIdentitySessionStore _sessionStore;
     private readonly ILogger<BackendApiClient> _logger;
-    private string? _jwt;
-    private DateTime _jwtExpiry = DateTime.MinValue;
-
-    // Exposed for test inspection — allows asserting the JWT was received and stored.
-    public string? StoredJwt => _jwt;
 
     public BackendApiClient(
         HttpClient httpClient,
-        IOptions<SimulatorOptions> options,
+        IIdentitySessionStore sessionStore,
         ILogger<BackendApiClient> logger)
     {
         _httpClient = httpClient;
-        _options = options.Value;
+        _sessionStore = sessionStore;
         _logger = logger;
-        _httpClient.BaseAddress = new Uri(_options.BackendBaseUrl);
-    }
-
-    public async Task AuthenticateAsync(CancellationToken cancellationToken)
-    {
-        var payload = new { email = _options.SimulatorEmail, password = _options.SimulatorPassword };
-        var response = await _httpClient.PostAsJsonAsync("/auth/login", payload, cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
-            throw new AuthenticationException($"Authentication failed with status {response.StatusCode}.");
-
-        using var doc = await JsonDocument.ParseAsync(
-            await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
-
-        _jwt = doc.RootElement.GetProperty("token").GetString()
-            ?? throw new AuthenticationException("Backend returned an empty token.");
-
-        _jwtExpiry = ExtractExpiry(_jwt);
-
-        _httpClient.DefaultRequestHeaders.Authorization =
-            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _jwt);
     }
 
     public async Task PostPositionAsync(VehiclePosition position, CancellationToken cancellationToken)
     {
-        await EnsureAuthenticatedAsync(cancellationToken);
-        var response = await _httpClient.PostAsJsonAsync(
-            $"/vehicles/{position.VehicleId}/position",
-            new { position.Latitude, position.Longitude },
-            cancellationToken);
+        var simulator = _sessionStore.Simulator;
+        var token = await _sessionStore.GetValidTokenAsync(simulator, cancellationToken);
 
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        using (var response = await SendPositionAsync(position, token, cancellationToken))
         {
-            await AuthenticateAsync(cancellationToken);
-            var retryResponse = await _httpClient.PostAsJsonAsync(
-                $"/vehicles/{position.VehicleId}/position",
-                new { position.Latitude, position.Longitude },
-                cancellationToken);
-
-            if (!retryResponse.IsSuccessStatusCode)
-                _logger.LogError(
-                    "POST /vehicles/{VehicleId}/position returned {StatusCode} after re-authentication.",
-                    position.VehicleId,
-                    retryResponse.StatusCode);
-        }
-    }
-
-    public async Task AcceptJobOfferAsync(string offerId, CancellationToken cancellationToken)
-    {
-        // TODO: POST /job-offers/{id}/accept
-        throw new NotImplementedException();
-    }
-
-    public async Task DeclineJobOfferAsync(string offerId, CancellationToken cancellationToken)
-    {
-        // TODO: POST /job-offers/{id}/decline
-        throw new NotImplementedException();
-    }
-
-    private async Task EnsureAuthenticatedAsync(CancellationToken cancellationToken)
-    {
-        if (_jwt is null || IsTokenExpiredOrNearExpiry())
-            await AuthenticateAsync(cancellationToken);
-    }
-
-    private bool IsTokenExpiredOrNearExpiry()
-    {
-        if (_jwtExpiry == DateTime.MinValue)
-            return false;
-
-        return DateTime.UtcNow >= _jwtExpiry.AddSeconds(-ReAuthBufferSeconds);
-    }
-
-    private static DateTime ExtractExpiry(string jwt)
-    {
-        var parts = jwt.Split('.');
-        if (parts.Length != 3)
-            return DateTime.MinValue;
-
-        try
-        {
-            var payloadJson = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
-            using var doc = JsonDocument.Parse(payloadJson);
-            if (doc.RootElement.TryGetProperty("exp", out var expElement))
-            {
-                var unixSeconds = expElement.GetInt64();
-                return DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
-            }
-        }
-        catch
-        {
-            // If the JWT is malformed, treat expiry as unknown — no re-auth forced
+            if (response.StatusCode != HttpStatusCode.Unauthorized)
+                return;
         }
 
-        return DateTime.MinValue;
+        await _sessionStore.AuthenticateAsync(simulator, cancellationToken);
+        using var retryResponse = await SendPositionAsync(position, simulator.Token!, cancellationToken);
+
+        if (!retryResponse.IsSuccessStatusCode)
+            _logger.LogError(
+                "POST /vehicles/{VehicleId}/position returned {StatusCode} after re-authentication.",
+                position.VehicleId,
+                retryResponse.StatusCode);
     }
 
-    private static byte[] Base64UrlDecode(string base64Url)
+    public Task AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken) =>
+        PostJobOfferActionAsync(offerId, "accept", rep, cancellationToken);
+
+    public Task DeclineJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken) =>
+        PostJobOfferActionAsync(offerId, "decline", rep, cancellationToken);
+
+    private async Task PostJobOfferActionAsync(
+        string offerId, string action, RepIdentity rep, CancellationToken cancellationToken)
     {
-        var padded = base64Url
-            .Replace('-', '+')
-            .Replace('_', '/');
+        var token = await _sessionStore.GetValidTokenAsync(rep, cancellationToken);
+        using var request = BuildAuthorizedRequest(HttpMethod.Post, $"/job-offers/{offerId}/{action}", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
 
-        var padding = padded.Length % 4;
-        if (padding != 0)
-            padded += new string('=', 4 - padding);
+        if (!response.IsSuccessStatusCode)
+            _logger.LogError(
+                "POST /job-offers/{OfferId}/{Action} returned {StatusCode} for rep {RepId}.",
+                offerId, action, response.StatusCode, rep.RepId);
+    }
 
-        return Convert.FromBase64String(padded);
+    private async Task<HttpResponseMessage> SendPositionAsync(
+        VehiclePosition position, string token, CancellationToken cancellationToken)
+    {
+        using var request = BuildAuthorizedRequest(
+            HttpMethod.Post, $"/vehicles/{position.VehicleId}/position", token);
+        request.Content = JsonContent.Create(new { position.Latitude, position.Longitude });
+        return await _httpClient.SendAsync(request, cancellationToken);
+    }
+
+    private static HttpRequestMessage BuildAuthorizedRequest(HttpMethod method, string relativeUri, string token)
+    {
+        var request = new HttpRequestMessage(method, relativeUri);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return request;
     }
 }

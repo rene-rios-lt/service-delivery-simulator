@@ -1,359 +1,159 @@
 using System.Net;
-using System.Security.Authentication;
-using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using Moq;
 using Moq.Protected;
-using ServiceDelivery.Simulator.Configuration;
 using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 using Xunit;
 
 namespace ServiceDelivery.Simulator.Tests.Services;
 
+// Covers the BackendApiClient HTTP behaviour after the per-rep retrofit:
+// position posts carry the Simulator identity's token; accept/decline carry the
+// responding rep's token; URLs/methods are correct; position 401 re-auths the
+// Simulator identity and retries once. Authentication/expiry/login itself is
+// tested in IdentitySessionStoreTests — the store owns that responsibility.
 public class BackendApiClientAuthTests
 {
+    private const string BaseUrl = "https://backend.local";
+
     // ─── Helpers ───────────────────────────────────────────────────────────────
 
-    private static SimulatorOptions DefaultOptions(
-        string email = "sim@test.internal",
-        string password = "secret",
-        string baseUrl = "https://backend.local") =>
-        new SimulatorOptions
+    private static RepIdentity SimulatorIdentity(string token = "sim-token") =>
+        new RepIdentity
         {
-            SimulatorEmail = email,
-            SimulatorPassword = password,
-            BackendBaseUrl = baseUrl
+            Email = "sim@system.internal",
+            Password = "pw",
+            Role = IdentityRole.Simulator,
+            Token = token
         };
 
-    private static (BackendApiClient client, Mock<HttpMessageHandler> handlerMock)
-        BuildClient(
-            SimulatorOptions options,
-            HttpResponseMessage? loginResponse = null,
-            HttpResponseMessage? secondResponse = null)
-    {
-        loginResponse ??= OkLoginResponse("test-jwt");
+    private static RepIdentity RepIdentity(string repId, string token, string email = "rep1@dealer.com") =>
+        new RepIdentity
+        {
+            Email = email,
+            Password = "pw",
+            Role = IdentityRole.ServiceRep,
+            RepId = repId,
+            Token = token
+        };
 
+    private static (BackendApiClient client, Mock<HttpMessageHandler> handlerMock, List<HttpRequestMessage> requests)
+        BuildClient(IIdentitySessionStore store, Func<int, HttpResponseMessage> responder, ILogger<BackendApiClient>? logger = null)
+    {
+        var requests = new List<HttpRequestMessage>();
         var handlerMock = new Mock<HttpMessageHandler>();
-
-        if (secondResponse is not null)
-        {
-            handlerMock
-                .Protected()
-                .SetupSequence<Task<HttpResponseMessage>>(
-                    "SendAsync",
-                    ItExpr.IsAny<HttpRequestMessage>(),
-                    ItExpr.IsAny<CancellationToken>())
-                .ReturnsAsync(loginResponse)
-                .ReturnsAsync(secondResponse);
-        }
-        else
-        {
-            handlerMock
-                .Protected()
-                .Setup<Task<HttpResponseMessage>>(
-                    "SendAsync",
-                    ItExpr.IsAny<HttpRequestMessage>(),
-                    ItExpr.IsAny<CancellationToken>())
-                .ReturnsAsync(loginResponse);
-        }
-
-        var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(options), NullLogger<BackendApiClient>.Instance);
-        return (client, handlerMock);
-    }
-
-    private static HttpResponseMessage OkLoginResponse(string token) =>
-        new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(
-                JsonSerializer.Serialize(new { token }),
-                Encoding.UTF8,
-                "application/json")
-        };
-
-    private static HttpResponseMessage OkPositionResponse() =>
-        new HttpResponseMessage(HttpStatusCode.OK);
-
-    // ─── AC-1: POST /auth/login with simulator credentials ────────────────────
-
-    [Fact]
-    public async Task GivenValidSimulatorCredentials_WhenAuthenticateAsyncCalled_ThenPostsToAuthLoginEndpoint()
-    {
-        // Arrange
-        var options = DefaultOptions(email: "sim@test.internal", password: "secret");
-        var (client, handlerMock) = BuildClient(options);
-        HttpRequestMessage? capturedRequest = null;
+        var callCount = 0;
         handlerMock
             .Protected()
             .Setup<Task<HttpResponseMessage>>(
                 "SendAsync",
                 ItExpr.IsAny<HttpRequestMessage>(),
                 ItExpr.IsAny<CancellationToken>())
-            .Callback<HttpRequestMessage, CancellationToken>((req, _) => capturedRequest = req)
-            .ReturnsAsync(OkLoginResponse("jwt-token"));
+            .Callback<HttpRequestMessage, CancellationToken>((req, _) => requests.Add(req))
+            .ReturnsAsync(() => responder(++callCount));
 
-        // Act
-        await client.AuthenticateAsync(CancellationToken.None);
-
-        // Assert
-        Assert.NotNull(capturedRequest);
-        Assert.Equal(HttpMethod.Post, capturedRequest!.Method);
-        Assert.Equal("/auth/login", capturedRequest.RequestUri!.AbsolutePath);
-
-        var body = await capturedRequest.Content!.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(body);
-        Assert.Equal("sim@test.internal", doc.RootElement.GetProperty("email").GetString());
-        Assert.Equal("secret", doc.RootElement.GetProperty("password").GetString());
+        var httpClient = new HttpClient(handlerMock.Object) { BaseAddress = new Uri(BaseUrl) };
+        var client = new BackendApiClient(httpClient, store, logger ?? NullLogger<BackendApiClient>.Instance);
+        return (client, handlerMock, requests);
     }
 
-    // ─── AC-2: JWT stored and set as Authorization: Bearer ───────────────────
-
-    [Fact]
-    public async Task GivenSuccessfulAuthentication_WhenAuthenticateAsyncCalled_ThenJwtIsStored()
+    private static Mock<IIdentitySessionStore> StoreWith(RepIdentity simulator)
     {
-        // Arrange
-        const string expectedJwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test";
-        var (client, _) = BuildClient(DefaultOptions(), loginResponse: OkLoginResponse(expectedJwt));
-
-        // Act
-        await client.AuthenticateAsync(CancellationToken.None);
-
-        // Assert
-        Assert.Equal(expectedJwt, client.StoredJwt);
+        var store = new Mock<IIdentitySessionStore>();
+        store.Setup(s => s.Simulator).Returns(simulator);
+        store.Setup(s => s.GetValidTokenAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((RepIdentity id, CancellationToken _) => id.Token!);
+        return store;
     }
 
+    private static HttpResponseMessage Ok() => new HttpResponseMessage(HttpStatusCode.OK);
+
+    // ─── AC-6: Position posting uses the Simulator token ──────────────────────
+
     [Fact]
-    public async Task GivenStoredJwt_WhenPostPositionAsyncCalled_ThenAuthorizationHeaderIsBearerToken()
+    public async Task GivenStoredSimulatorToken_WhenPostPositionAsyncCalled_ThenAuthorizationHeaderIsSimulatorToken()
     {
         // Arrange
-        const string expectedJwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test";
-        var (client, handlerMock) = BuildClient(
-            DefaultOptions(),
-            loginResponse: OkLoginResponse(expectedJwt),
-            secondResponse: OkPositionResponse());
-
-        await client.AuthenticateAsync(CancellationToken.None);
-
-        HttpRequestMessage? capturedPositionRequest = null;
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>(
-                "SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .Callback<HttpRequestMessage, CancellationToken>((req, _) => capturedPositionRequest = req)
-            .ReturnsAsync(OkPositionResponse());
-
+        var simulator = SimulatorIdentity(token: "the-simulator-token");
+        var store = StoreWith(simulator);
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
         var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
 
         // Act
         await client.PostPositionAsync(position, CancellationToken.None);
 
         // Assert
-        Assert.NotNull(capturedPositionRequest);
-        Assert.Equal("Bearer", capturedPositionRequest!.Headers.Authorization?.Scheme);
-        Assert.Equal(expectedJwt, capturedPositionRequest.Headers.Authorization?.Parameter);
-    }
-
-    // ─── AC-3: Authentication failure → AuthenticationException ──────────────
-
-    [Fact]
-    public async Task GivenBackendReturns401_WhenAuthenticateAsyncCalled_ThenThrowsAuthenticationException()
-    {
-        // Arrange
-        var unauthorizedResponse = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-        var (client, _) = BuildClient(DefaultOptions(), loginResponse: unauthorizedResponse);
-
-        // Act & Assert
-        await Assert.ThrowsAsync<AuthenticationException>(
-            () => client.AuthenticateAsync(CancellationToken.None));
+        var request = Assert.Single(requests);
+        Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Assert.Equal("the-simulator-token", request.Headers.Authorization?.Parameter);
     }
 
     [Fact]
-    public async Task GivenAuthenticationException_WhenStartupRuns_ThenHostLogsErrorAndStops()
+    public async Task GivenStoredSimulatorToken_WhenPostPositionAsyncCalled_ThenPostsToVehiclesPositionEndpoint()
     {
         // Arrange
-        var unauthorizedResponse = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-        var (client, _) = BuildClient(DefaultOptions(), loginResponse: unauthorizedResponse);
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+        var position = new VehiclePosition("vehicle-7", 41.5, -93.6);
 
         // Act
-        var exception = await Record.ExceptionAsync(
-            () => client.AuthenticateAsync(CancellationToken.None));
-
-        // Assert
-        Assert.NotNull(exception);
-        Assert.IsType<AuthenticationException>(exception);
-        Assert.Contains("Unauthorized", exception.Message);
-    }
-
-    // ─── AC-4: Re-authentication on JWT expiry ────────────────────────────────
-
-    [Fact]
-    public async Task GivenExpiredJwt_WhenPostPositionAsyncCalled_ThenReAuthenticatesFirst()
-    {
-        // Arrange — build an already-expired JWT token (exp in the past)
-        var expiredJwt = BuildJwtWithExpiry(DateTime.UtcNow.AddMinutes(-1));
-        var freshJwt = "fresh-jwt-token";
-
-        var handlerMock = new Mock<HttpMessageHandler>();
-        var callCount = 0;
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>(
-                "SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(() =>
-            {
-                callCount++;
-                return callCount == 1
-                    ? OkLoginResponse(expiredJwt)   // initial auth returns expired JWT
-                    : callCount == 2
-                        ? OkLoginResponse(freshJwt) // re-auth returns fresh JWT
-                        : OkPositionResponse();     // position POST succeeds
-            });
-
-        var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(DefaultOptions()), NullLogger<BackendApiClient>.Instance);
-
-        // Perform initial authentication (stores expired JWT)
-        await client.AuthenticateAsync(CancellationToken.None);
-        var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
-
-        // Act — posting position should detect expiry and re-authenticate first
         await client.PostPositionAsync(position, CancellationToken.None);
 
-        // Assert — three calls: initial auth, re-auth, position POST
-        handlerMock.Protected().Verify(
-            "SendAsync",
-            Times.Exactly(3),
-            ItExpr.IsAny<HttpRequestMessage>(),
-            ItExpr.IsAny<CancellationToken>());
-        Assert.Equal(freshJwt, client.StoredJwt);
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("/vehicles/vehicle-7/position", request.RequestUri!.AbsolutePath);
     }
 
     [Fact]
-    public async Task GivenReAuthenticationSucceeds_WhenOriginalCallRetried_ThenCallSucceeds()
+    public async Task GivenPositionPostReturns401_WhenPostPositionAsyncCalled_ThenSimulatorIdentityReAuthenticatesAndRetriesOnce()
     {
-        // Arrange — build an already-expired JWT token
-        var expiredJwt = BuildJwtWithExpiry(DateTime.UtcNow.AddMinutes(-1));
-        var freshJwt = "fresh-valid-jwt";
+        // Arrange — first POST 401, store re-auths the Simulator identity, retry succeeds
+        var simulator = SimulatorIdentity();
+        var store = new Mock<IIdentitySessionStore>();
+        store.Setup(s => s.Simulator).Returns(simulator);
+        store.Setup(s => s.GetValidTokenAsync(simulator, It.IsAny<CancellationToken>()))
+            .ReturnsAsync("sim-token");
 
-        var handlerMock = new Mock<HttpMessageHandler>();
-        var callCount = 0;
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>(
-                "SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(() =>
-            {
-                callCount++;
-                return callCount == 1
-                    ? OkLoginResponse(expiredJwt)   // initial auth
-                    : callCount == 2
-                        ? OkLoginResponse(freshJwt) // re-auth
-                        : OkPositionResponse();     // position POST
-            });
-
-        var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(DefaultOptions()), NullLogger<BackendApiClient>.Instance);
-        await client.AuthenticateAsync(CancellationToken.None);
-
+        var (client, _, requests) = BuildClient(
+            store.Object,
+            call => call == 1
+                ? new HttpResponseMessage(HttpStatusCode.Unauthorized)
+                : Ok());
         var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
 
         // Act
-        var exception = await Record.ExceptionAsync(
-            () => client.PostPositionAsync(position, CancellationToken.None));
+        await client.PostPositionAsync(position, CancellationToken.None);
 
-        // Assert — no exception thrown, call completed successfully
-        Assert.Null(exception);
-    }
-
-    // ─── AC-3 (SIM-004): 401 on position POST → re-authenticate and retry once ─
-
-    [Fact]
-    public async Task GivenBackendReturns401OnPositionPost_WhenPostPositionAsyncCalled_ThenReAuthenticatesAndRetries()
-    {
-        // Arrange — initial auth succeeds, position POST returns 401, re-auth succeeds, retry succeeds
-        var options = DefaultOptions();
-        var handlerMock = new Mock<HttpMessageHandler>();
-        var callCount = 0;
-
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>(
-                "SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(() =>
-            {
-                callCount++;
-                return callCount switch
-                {
-                    1 => OkLoginResponse("initial-jwt"),          // initial EnsureAuth
-                    2 => new HttpResponseMessage(HttpStatusCode.Unauthorized), // position POST → 401
-                    3 => OkLoginResponse("refreshed-jwt"),        // re-auth call
-                    4 => OkPositionResponse(),                    // retry POST succeeds
-                    _ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
-                };
-            });
-
-        var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(options), NullLogger<BackendApiClient>.Instance);
-        var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
-
-        // Act
-        var exception = await Record.ExceptionAsync(
-            () => client.PostPositionAsync(position, CancellationToken.None));
-
-        // Assert — no exception thrown; 4 HTTP calls made (initial auth + POST 401 + re-auth + retry POST)
-        Assert.Null(exception);
-        Assert.Equal(4, callCount);
+        // Assert — two POSTs (original + retry); the Simulator identity was re-authenticated
+        Assert.Equal(2, requests.Count);
+        store.Verify(s => s.AuthenticateAsync(simulator, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task GivenBackendReturns401TwiceOnPositionPost_WhenPostPositionAsyncCalled_ThenLogsErrorAndDoesNotThrow()
+    public async Task GivenPositionPostReturns401Twice_WhenPostPositionAsyncCalled_ThenLogsErrorAndDoesNotThrow()
     {
-        // Arrange — initial auth succeeds, position POST returns 401, re-auth succeeds, retry also returns 401
-        var options = DefaultOptions();
-        var handlerMock = new Mock<HttpMessageHandler>();
+        // Arrange — both the original and the retry POST return 401
+        var simulator = SimulatorIdentity();
+        var store = new Mock<IIdentitySessionStore>();
+        store.Setup(s => s.Simulator).Returns(simulator);
+        store.Setup(s => s.GetValidTokenAsync(simulator, It.IsAny<CancellationToken>()))
+            .ReturnsAsync("sim-token");
         var loggerMock = new Mock<ILogger<BackendApiClient>>();
-        var callCount = 0;
 
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>(
-                "SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(() =>
-            {
-                callCount++;
-                return callCount switch
-                {
-                    1 => OkLoginResponse("initial-jwt"),          // initial EnsureAuth
-                    2 => new HttpResponseMessage(HttpStatusCode.Unauthorized), // first POST → 401
-                    3 => OkLoginResponse("refreshed-jwt"),        // re-auth call
-                    4 => new HttpResponseMessage(HttpStatusCode.Unauthorized), // retry POST → 401 again
-                    _ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
-                };
-            });
-
-        var httpClient = new HttpClient(handlerMock.Object);
-        var client = new BackendApiClient(httpClient, Options.Create(options), loggerMock.Object);
+        var (client, _, _) = BuildClient(
+            store.Object,
+            _ => new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            loggerMock.Object);
         var position = new VehiclePosition("vehicle-1", 41.5, -93.6);
 
         // Act
         var exception = await Record.ExceptionAsync(
             () => client.PostPositionAsync(position, CancellationToken.None));
 
-        // Assert — no exception thrown; error was logged
+        // Assert
         Assert.Null(exception);
         loggerMock.Verify(
             l => l.Log(
@@ -365,20 +165,91 @@ public class BackendApiClientAuthTests
             Times.AtLeastOnce);
     }
 
-    // ─── JWT Test Helpers ─────────────────────────────────────────────────────
+    // ─── AC-3 / AC-5: Accept/Decline carry the responding rep's token ─────────
 
-    private static string BuildJwtWithExpiry(DateTime expiry)
+    [Fact]
+    public async Task GivenARepIdentity_WhenAcceptJobOfferAsyncCalled_ThenAuthorizationHeaderIsThatRepsToken()
     {
-        var header = Base64UrlEncode(JsonSerializer.Serialize(new { alg = "HS256", typ = "JWT" }));
-        var unixExpiry = new DateTimeOffset(expiry).ToUnixTimeSeconds();
-        var payload = Base64UrlEncode(JsonSerializer.Serialize(new { sub = "sim", exp = unixExpiry }));
-        var signature = Base64UrlEncode("test-signature");
-        return $"{header}.{payload}.{signature}";
+        // Arrange
+        var rep = RepIdentity(repId: "rep-3", token: "rep3-token", email: "rep3@dealer.com");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.AcceptJobOfferAsync("offer-1", rep, CancellationToken.None);
+
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Assert.Equal("rep3-token", request.Headers.Authorization?.Parameter);
     }
 
-    private static string Base64UrlEncode(string value) =>
-        Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
-            .TrimEnd('=')
-            .Replace('+', '-')
-            .Replace('/', '_');
+    [Fact]
+    public async Task GivenTwoDifferentReps_WhenEachAcceptsAnOffer_ThenEachRequestCarriesItsOwnRepToken()
+    {
+        // Arrange
+        var repA = RepIdentity(repId: "rep-1", token: "tokenA", email: "rep1@dealer.com");
+        var repB = RepIdentity(repId: "rep-2", token: "tokenB", email: "rep2@dealer.com");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.AcceptJobOfferAsync("offer-1", repA, CancellationToken.None);
+        await client.AcceptJobOfferAsync("offer-2", repB, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(2, requests.Count);
+        Assert.Equal("tokenA", requests[0].Headers.Authorization?.Parameter);
+        Assert.Equal("tokenB", requests[1].Headers.Authorization?.Parameter);
+    }
+
+    [Fact]
+    public async Task GivenAnOfferAndRep_WhenAcceptJobOfferAsyncCalled_ThenPostsToJobOffersAcceptEndpoint()
+    {
+        // Arrange
+        var rep = RepIdentity(repId: "rep-1", token: "token");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.AcceptJobOfferAsync("offer-42", rep, CancellationToken.None);
+
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("/job-offers/offer-42/accept", request.RequestUri!.AbsolutePath);
+    }
+
+    [Fact]
+    public async Task GivenAnOfferAndRep_WhenDeclineJobOfferAsyncCalled_ThenPostsToJobOffersDeclineEndpoint()
+    {
+        // Arrange
+        var rep = RepIdentity(repId: "rep-1", token: "token");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.DeclineJobOfferAsync("offer-42", rep, CancellationToken.None);
+
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("/job-offers/offer-42/decline", request.RequestUri!.AbsolutePath);
+    }
+
+    [Fact]
+    public async Task GivenAnOfferAndRep_WhenDeclineJobOfferAsyncCalled_ThenAuthorizationHeaderIsThatRepsToken()
+    {
+        // Arrange
+        var rep = RepIdentity(repId: "rep-5", token: "rep5-token", email: "rep5@dealer.com");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.DeclineJobOfferAsync("offer-9", rep, CancellationToken.None);
+
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal("rep5-token", request.Headers.Authorization?.Parameter);
+    }
 }

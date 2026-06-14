@@ -1,3 +1,4 @@
+using System.Security.Authentication;
 using Microsoft.Extensions.Logging;
 using Moq;
 using ServiceDelivery.Simulator.Models;
@@ -11,19 +12,24 @@ public class SimulatorStartupServiceTests
 {
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
-    private static Mock<IBackendApiClient> DefaultApiClientMock(string jwt = "test-jwt")
+    private static RepIdentity Simulator() =>
+        new RepIdentity { Email = "sim@system.internal", Password = "pw", Role = IdentityRole.Simulator };
+
+    private static RepIdentity Rep(string email) =>
+        new RepIdentity { Email = email, Password = "pw", Role = IdentityRole.ServiceRep };
+
+    private static Mock<IIdentitySessionStore> StoreWith(RepIdentity simulator, params RepIdentity[] reps)
     {
-        var mock = new Mock<IBackendApiClient>();
-        mock.Setup(c => c.AuthenticateAsync(It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
-        mock.Setup(c => c.StoredJwt).Returns(jwt);
-        return mock;
+        var store = new Mock<IIdentitySessionStore>();
+        store.Setup(s => s.Simulator).Returns(simulator);
+        store.Setup(s => s.Reps).Returns(reps);
+        return store;
     }
 
     private static Mock<ISignalRClient> DefaultSignalRClientMock()
     {
         var mock = new Mock<ISignalRClient>();
-        mock.Setup(c => c.ConnectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        mock.Setup(c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         return mock;
     }
@@ -31,119 +37,211 @@ public class SimulatorStartupServiceTests
     private static ILogger<SimulatorStartupService> NullLogger() =>
         new Mock<ILogger<SimulatorStartupService>>().Object;
 
-    // ─── AC-2: RegisterJobOfferHandler called before ConnectAsync ────────────
+    // ─── Ordering: authenticate before connect, register before connect ──────
 
     [Fact]
-    public async Task GivenStartupService_WhenExecuteAsyncRuns_ThenRegisterJobOfferHandlerCalledBeforeConnectAsync()
+    public async Task GivenStartupService_WhenStartAsyncRuns_ThenSimulatorAuthenticatedBeforeConnect()
     {
         // Arrange
         var callOrder = new List<string>();
-
-        var apiClientMock = DefaultApiClientMock();
-
-        var signalRClientMock = new Mock<ISignalRClient>();
-        signalRClientMock
-            .Setup(c => c.RegisterJobOfferHandler(It.IsAny<Action<JobOfferPayload>>()))
-            .Callback(() => callOrder.Add("RegisterJobOfferHandler"));
-        signalRClientMock
-            .Setup(c => c.ConnectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback(() => callOrder.Add("ConnectAsync"))
+        var simulator = Simulator();
+        var store = StoreWith(simulator, Rep("rep1@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Callback<RepIdentity, CancellationToken>((id, _) =>
+                callOrder.Add(id.Role == IdentityRole.Simulator ? "AuthSimulator" : "AuthRep"))
             .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(apiClientMock.Object, signalRClientMock.Object, NullLogger());
-
-        // Act
-        await service.StartAsync(CancellationToken.None);
-
-        // Assert — handler registration must precede connect
-        var registerIndex = callOrder.IndexOf("RegisterJobOfferHandler");
-        var connectIndex = callOrder.IndexOf("ConnectAsync");
-        Assert.True(registerIndex >= 0, "RegisterJobOfferHandler was not called");
-        Assert.True(connectIndex >= 0, "ConnectAsync was not called");
-        Assert.True(registerIndex < connectIndex,
-            $"Expected RegisterJobOfferHandler (index {registerIndex}) before ConnectAsync (index {connectIndex})");
-    }
-
-    [Fact]
-    public async Task GivenStartupService_WhenExecuteAsyncRuns_ThenAuthenticateCalledBeforeConnectAsync()
-    {
-        // Arrange
-        var callOrder = new List<string>();
-
-        var apiClientMock = new Mock<IBackendApiClient>();
-        apiClientMock
-            .Setup(c => c.AuthenticateAsync(It.IsAny<CancellationToken>()))
-            .Callback(() => callOrder.Add("AuthenticateAsync"))
-            .Returns(Task.CompletedTask);
-        apiClientMock.Setup(c => c.StoredJwt).Returns("test-jwt");
-
-        var signalRClientMock = new Mock<ISignalRClient>();
-        signalRClientMock
-            .Setup(c => c.RegisterJobOfferHandler(It.IsAny<Action<JobOfferPayload>>()))
-            .Callback(() => callOrder.Add("RegisterJobOfferHandler"));
-        signalRClientMock
-            .Setup(c => c.ConnectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback(() => callOrder.Add("ConnectAsync"))
+        var signalR = new Mock<ISignalRClient>();
+        signalR.Setup(c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()))
+            .Callback(() => callOrder.Add("Connect"))
             .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(apiClientMock.Object, signalRClientMock.Object, NullLogger());
-
-        // Act
-        await service.StartAsync(CancellationToken.None);
-
-        // Assert — authenticate must precede connect
-        var authIndex = callOrder.IndexOf("AuthenticateAsync");
-        var connectIndex = callOrder.IndexOf("ConnectAsync");
-        Assert.True(authIndex >= 0, "AuthenticateAsync was not called");
-        Assert.True(connectIndex >= 0, "ConnectAsync was not called");
-        Assert.True(authIndex < connectIndex,
-            $"Expected AuthenticateAsync (index {authIndex}) before ConnectAsync (index {connectIndex})");
-    }
-
-    [Fact]
-    public async Task GivenStartupService_WhenExecuteAsyncRuns_ThenConnectAsyncReceivesStoredJwt()
-    {
-        // Arrange
-        const string expectedJwt = "stored-jwt-from-auth";
-        string? capturedJwt = null;
-
-        var apiClientMock = DefaultApiClientMock(jwt: expectedJwt);
-
-        var signalRClientMock = new Mock<ISignalRClient>();
-        signalRClientMock
-            .Setup(c => c.ConnectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<string, CancellationToken>((jwt, _) => capturedJwt = jwt)
-            .Returns(Task.CompletedTask);
-
-        var service = new SimulatorStartupService(apiClientMock.Object, signalRClientMock.Object, NullLogger());
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
 
         // Act
         await service.StartAsync(CancellationToken.None);
 
         // Assert
-        Assert.Equal(expectedJwt, capturedJwt);
+        var simAuthIndex = callOrder.IndexOf("AuthSimulator");
+        var connectIndex = callOrder.IndexOf("Connect");
+        Assert.True(simAuthIndex >= 0, "Simulator was not authenticated");
+        Assert.True(connectIndex >= 0, "ConnectAllAsync was not called");
+        Assert.True(simAuthIndex < connectIndex,
+            $"Expected Simulator auth (index {simAuthIndex}) before Connect (index {connectIndex})");
     }
 
-    // ─── AC-4: Workers not blocked when SignalR connection fails ─────────────
-
     [Fact]
-    public async Task GivenSignalRConnectionFails_WhenStartupServiceRuns_ThenStartAsyncCompletesWithoutException()
+    public async Task GivenStartupService_WhenStartAsyncRuns_ThenRegisterJobOfferHandlerCalledBeforeConnect()
     {
         // Arrange
-        var apiClientMock = DefaultApiClientMock();
+        var callOrder = new List<string>();
+        var store = StoreWith(Simulator(), Rep("rep1@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
 
-        var signalRClientMock = new Mock<ISignalRClient>();
-        signalRClientMock
-            .Setup(c => c.ConnectAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("Connection failed"));
+        var signalR = new Mock<ISignalRClient>();
+        signalR.Setup(c => c.RegisterJobOfferHandler(It.IsAny<Action<string, JobOfferPayload>>()))
+            .Callback(() => callOrder.Add("Register"));
+        signalR.Setup(c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()))
+            .Callback(() => callOrder.Add("Connect"))
+            .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(apiClientMock.Object, signalRClientMock.Object, NullLogger());
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
 
         // Act
-        var exception = await Record.ExceptionAsync(
-            () => service.StartAsync(CancellationToken.None));
+        await service.StartAsync(CancellationToken.None);
 
-        // Assert — startup completes without exception; VehicleWorkers are not blocked
+        // Assert
+        var registerIndex = callOrder.IndexOf("Register");
+        var connectIndex = callOrder.IndexOf("Connect");
+        Assert.True(registerIndex >= 0, "RegisterJobOfferHandler was not called");
+        Assert.True(connectIndex >= 0, "ConnectAllAsync was not called");
+        Assert.True(registerIndex < connectIndex,
+            $"Expected Register (index {registerIndex}) before Connect (index {connectIndex})");
+    }
+
+    [Fact]
+    public async Task GivenAuthenticatedReps_WhenStartAsyncRuns_ThenConnectAllAsyncReceivesEveryRep()
+    {
+        // Arrange
+        var rep1 = Rep("rep1@dealer.com");
+        var rep2 = Rep("rep2@dealer.com");
+        var store = StoreWith(Simulator(), rep1, rep2);
+        store.Setup(s => s.AuthenticateAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        IEnumerable<RepIdentity>? connectedReps = null;
+        var signalR = new Mock<ISignalRClient>();
+        signalR.Setup(c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()))
+            .Callback<IEnumerable<RepIdentity>, CancellationToken>((reps, _) => connectedReps = reps.ToList())
+            .Returns(Task.CompletedTask);
+
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+
+        // Act
+        await service.StartAsync(CancellationToken.None);
+
+        // Assert
+        Assert.NotNull(connectedReps);
+        Assert.Contains(rep1, connectedReps!);
+        Assert.Contains(rep2, connectedReps!);
+    }
+
+    // ─── AC-7: one rep login failure skips only that rep ─────────────────────
+
+    [Fact]
+    public async Task GivenOneRepLoginFails_WhenStartupRuns_ThenOtherRepsAreStillAuthenticatedAndStartupCompletes()
+    {
+        // Arrange — rep1 login throws; sim + rep2 succeed
+        var simulator = Simulator();
+        var rep1 = Rep("rep1@dealer.com");
+        var rep2 = Rep("rep2@dealer.com");
+        var store = StoreWith(simulator, rep1, rep2);
+        store.Setup(s => s.AuthenticateAsync(simulator, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        store.Setup(s => s.AuthenticateAsync(rep1, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AuthenticationException("rep1 failed"));
+        store.Setup(s => s.AuthenticateAsync(rep2, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+
+        var signalR = DefaultSignalRClientMock();
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => service.StartAsync(CancellationToken.None));
+
+        // Assert — startup completes; rep2 was authenticated despite rep1 failing
         Assert.Null(exception);
+        store.Verify(s => s.AuthenticateAsync(rep2, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GivenOneRepLoginFails_WhenStartupRuns_ThenOnlyTheSucceedingRepsAreConnected()
+    {
+        // Arrange
+        var simulator = Simulator();
+        var rep1 = Rep("rep1@dealer.com");
+        var rep2 = Rep("rep2@dealer.com");
+        var store = StoreWith(simulator, rep1, rep2);
+        store.Setup(s => s.AuthenticateAsync(simulator, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        store.Setup(s => s.AuthenticateAsync(rep1, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AuthenticationException("rep1 failed"));
+        store.Setup(s => s.AuthenticateAsync(rep2, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+
+        IEnumerable<RepIdentity>? connectedReps = null;
+        var signalR = new Mock<ISignalRClient>();
+        signalR.Setup(c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()))
+            .Callback<IEnumerable<RepIdentity>, CancellationToken>((reps, _) => connectedReps = reps.ToList())
+            .Returns(Task.CompletedTask);
+
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+
+        // Act
+        await service.StartAsync(CancellationToken.None);
+
+        // Assert — only rep2 is handed to ConnectAllAsync
+        Assert.NotNull(connectedReps);
+        Assert.DoesNotContain(rep1, connectedReps!);
+        Assert.Contains(rep2, connectedReps!);
+    }
+
+    // ─── AC-7: per-connection failure isolation delegated to the SignalR client ─
+
+    [Fact]
+    public async Task GivenOneRepConnectionFails_WhenStartupRuns_ThenOtherRepsStillConnectAndStartupCompletes()
+    {
+        // Arrange — all reps authenticate; ConnectAllAsync absorbs its own per-connection failures
+        var store = StoreWith(Simulator(), Rep("rep1@dealer.com"), Rep("rep2@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var signalR = DefaultSignalRClientMock();
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+
+        // Act
+        var exception = await Record.ExceptionAsync(() => service.StartAsync(CancellationToken.None));
+
+        // Assert — startup completes and ConnectAllAsync was invoked once for the surviving reps
+        Assert.Null(exception);
+        signalR.Verify(
+            c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    // ─── AC-7: Simulator (position) account failure aborts startup ───────────
+
+    [Fact]
+    public async Task GivenSimulatorAccountLoginFails_WhenStartupRuns_ThenStartAsyncThrowsAndStartupAborts()
+    {
+        // Arrange — the Simulator identity login throws
+        var simulator = Simulator();
+        var store = StoreWith(simulator, Rep("rep1@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(simulator, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AuthenticationException("simulator login failed"));
+
+        var signalR = DefaultSignalRClientMock();
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+
+        // Act & Assert — the exception propagates so the host aborts startup
+        await Assert.ThrowsAsync<AuthenticationException>(() => service.StartAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GivenSimulatorAccountLoginFails_WhenStartupRuns_ThenNoRepConnectionsAreAttempted()
+    {
+        // Arrange
+        var simulator = Simulator();
+        var store = StoreWith(simulator, Rep("rep1@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(simulator, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AuthenticationException("simulator login failed"));
+
+        var signalR = DefaultSignalRClientMock();
+        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+
+        // Act
+        await Record.ExceptionAsync(() => service.StartAsync(CancellationToken.None));
+
+        // Assert — startup aborted before connecting any rep
+        signalR.Verify(
+            c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 }

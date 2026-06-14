@@ -6,16 +6,19 @@ using ServiceDelivery.Simulator.Models;
 
 namespace ServiceDelivery.Simulator.Services;
 
-// Connects to the backend's RepHub to receive job offers for the simulator service account.
-// The simulator auto-accepts (~85%) or auto-declines (~15%) each offer.
+// Manages one RepHub connection per operated rep. Each connection is built with that
+// rep's own JWT so the hub joins it to rep:{repId} from the connection's own identity.
+// A single rep-aware handler is invoked for every received offer; each connection's
+// On<JobOfferPayload> closure captures its owning rep's RepId, so the handler always
+// learns which rep the offer belongs to. A single connection failing is logged and
+// skipped — the other reps still connect.
 public sealed class SignalRClient : ISignalRClient
 {
     private readonly SimulatorOptions _options;
     private readonly IHubConnectionFactory _factory;
     private readonly ILogger<SignalRClient> _logger;
-    private HubConnection? _connection;
-    private Action<JobOfferPayload>? _jobOfferHandler;
-    internal Action<JobOfferPayload>? JobOfferHandlerForTest => _jobOfferHandler;
+    private readonly Dictionary<string, HubConnection> _connections = new();
+    private Action<string, JobOfferPayload>? _jobOfferHandler;
 
     public SignalRClient(
         IOptions<SimulatorOptions> options,
@@ -27,34 +30,53 @@ public sealed class SignalRClient : ISignalRClient
         _logger = logger;
     }
 
-    public void RegisterJobOfferHandler(Action<JobOfferPayload> handler)
+    public void RegisterJobOfferHandler(Action<string, JobOfferPayload> handler)
     {
         _jobOfferHandler = handler;
     }
 
-    public async Task ConnectAsync(string jwt, CancellationToken cancellationToken)
+    public async Task ConnectAllAsync(IEnumerable<RepIdentity> reps, CancellationToken cancellationToken)
     {
         var hubUrl = $"{_options.BackendBaseUrl}/hubs/rep";
-        _connection = _factory.Build(hubUrl, jwt);
 
-        if (_jobOfferHandler is not null)
+        foreach (var rep in reps)
         {
-            _connection.On<JobOfferPayload>("JobOfferReceived", _jobOfferHandler);
-        }
+            var repId = rep.RepId ?? string.Empty;
+            var connection = _factory.Build(hubUrl, rep.Token ?? string.Empty);
 
-        try
-        {
-            await _connection.StartAsync(cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to connect to RepHub at {HubUrl}. Workers will continue independently.", hubUrl);
+            if (_jobOfferHandler is not null)
+            {
+                connection.On<JobOfferPayload>(
+                    "JobOfferReceived",
+                    payload => _jobOfferHandler(repId, payload));
+            }
+
+            _connections[repId] = connection;
+
+            try
+            {
+                await connection.StartAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Failed to connect RepHub for rep {RepId} at {HubUrl}. Skipping this rep; others continue.",
+                    repId, hubUrl);
+            }
         }
     }
 
+    // Test seam: drives the same per-connection attribution path that the real
+    // On<JobOfferPayload> closure invokes, without a live hub round-trip.
+    internal void InvokeJobOfferForTest(string repId, JobOfferPayload payload) =>
+        _jobOfferHandler?.Invoke(repId, payload);
+
     public async ValueTask DisposeAsync()
     {
-        if (_connection is not null)
-            await _connection.DisposeAsync();
+        foreach (var connection in _connections.Values)
+            await connection.DisposeAsync();
+
+        _connections.Clear();
     }
 }

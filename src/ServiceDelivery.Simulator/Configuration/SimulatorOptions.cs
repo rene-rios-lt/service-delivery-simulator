@@ -10,4 +10,6 @@ public sealed class SimulatorOptions
     public int OnSiteDelaySeconds { get; init; } = 30;
     public string SimulatorEmail { get; init; } = string.Empty;
     public string SimulatorPassword { get; init; } = string.Empty;
+    public string[] RepEmails { get; init; } = [];
+    public string RepPassword { get; init; } = string.Empty;
 }

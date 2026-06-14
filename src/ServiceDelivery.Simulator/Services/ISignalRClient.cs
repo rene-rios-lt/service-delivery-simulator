@@ -4,6 +4,6 @@ namespace ServiceDelivery.Simulator.Services;
 
 public interface ISignalRClient : IAsyncDisposable
 {
-    void RegisterJobOfferHandler(Action<JobOfferPayload> handler);
-    Task ConnectAsync(string jwt, CancellationToken cancellationToken);
+    void RegisterJobOfferHandler(Action<string, JobOfferPayload> handler);
+    Task ConnectAllAsync(IEnumerable<RepIdentity> reps, CancellationToken cancellationToken);
 }

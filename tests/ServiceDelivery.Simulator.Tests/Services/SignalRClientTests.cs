@@ -14,44 +14,69 @@ public class SignalRClientTests
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
     private static SimulatorOptions DefaultOptions(string baseUrl = "https://backend.local") =>
-        new SimulatorOptions
-        {
-            BackendBaseUrl = baseUrl,
-            SimulatorEmail = "sim@test.internal",
-            SimulatorPassword = "secret"
-        };
+        new SimulatorOptions { BackendBaseUrl = baseUrl };
 
     private static ILogger<SignalRClient> NullLogger() =>
         new Mock<ILogger<SignalRClient>>().Object;
 
-    // ─── AC-1: HubConnection URL contains /hubs/rep ───────────────────────────
+    private static RepIdentity Rep(string repId, string token, string email) =>
+        new RepIdentity
+        {
+            Email = email,
+            Password = "pw",
+            Role = IdentityRole.ServiceRep,
+            RepId = repId,
+            Token = token
+        };
 
-    [Fact]
-    public async Task GivenAJwtAndBaseUrl_WhenConnectAsyncCalled_ThenHubConnectionUrlContainsHubsRep()
+    private static JobOfferPayload Offer(string offerId) =>
+        new JobOfferPayload(
+            OfferId: offerId, RequestId: "req", RequesterName: "Alice",
+            RequesterTier: "Gold", DtcTitle: "P0300", Latitude: 41.5, Longitude: -93.5,
+            DistanceMiles: 10.0, EtaMinutes: 15);
+
+    private static Mock<IHubConnectionFactory> WorkingFactory()
     {
-        // Arrange
-        string? capturedUrl = null;
         var factoryMock = new Mock<IHubConnectionFactory>();
         factoryMock
             .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
-            .Callback<string, string>((url, _) => capturedUrl = url)
-            .Returns(new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
+            .Returns(() => new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
+        return factoryMock;
+    }
 
-        var client = new SignalRClient(
-            Options.Create(DefaultOptions("https://backend.local")),
-            factoryMock.Object,
-            NullLogger());
+    // ─── AC-4: one Build(url, jwt) per rep with that rep's JWT ────────────────
+
+    [Fact]
+    public async Task GivenEightOperatedReps_WhenConnectAllAsyncCalled_ThenBuildIsCalledOncePerRepWithThatRepsJwt()
+    {
+        // Arrange
+        var captured = new List<(string Url, string Jwt)>();
+        var factoryMock = new Mock<IHubConnectionFactory>();
+        factoryMock
+            .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((url, jwt) => captured.Add((url, jwt)))
+            .Returns(() => new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
+
+        var reps = Enumerable.Range(1, 8)
+            .Select(i => Rep($"rep-{i}", $"token-{i}", $"rep{i}@dealer.com"))
+            .ToList();
+
+        var client = new SignalRClient(Options.Create(DefaultOptions()), factoryMock.Object, NullLogger());
 
         // Act
-        await client.ConnectAsync("test-jwt", CancellationToken.None);
+        await client.ConnectAllAsync(reps, CancellationToken.None);
 
-        // Assert
-        Assert.NotNull(capturedUrl);
-        Assert.Contains("/hubs/rep", capturedUrl);
+        // Assert — one Build per rep, each with that rep's JWT and the rep hub URL
+        Assert.Equal(8, captured.Count);
+        for (var i = 1; i <= 8; i++)
+        {
+            Assert.Contains(captured, c => c.Jwt == $"token-{i}");
+        }
+        Assert.All(captured, c => Assert.Contains("/hubs/rep", c.Url));
     }
 
     [Fact]
-    public async Task GivenAJwtAndBaseUrl_WhenConnectAsyncCalled_ThenBaseUrlPrefixesHubsRepPath()
+    public async Task GivenAReps_WhenConnectAllAsyncCalled_ThenHubUrlIsPrefixedByBackendBaseUrl()
     {
         // Arrange
         string? capturedUrl = null;
@@ -59,78 +84,71 @@ public class SignalRClientTests
         factoryMock
             .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
             .Callback<string, string>((url, _) => capturedUrl = url)
-            .Returns(new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
+            .Returns(() => new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
 
         var client = new SignalRClient(
-            Options.Create(DefaultOptions("https://mybackend.local")),
-            factoryMock.Object,
-            NullLogger());
+            Options.Create(DefaultOptions("https://mybackend.local")), factoryMock.Object, NullLogger());
 
         // Act
-        await client.ConnectAsync("test-jwt", CancellationToken.None);
+        await client.ConnectAllAsync(new[] { Rep("rep-1", "token-1", "rep1@dealer.com") }, CancellationToken.None);
 
         // Assert
         Assert.NotNull(capturedUrl);
         Assert.StartsWith("https://mybackend.local", capturedUrl);
+        Assert.Contains("/hubs/rep", capturedUrl);
     }
 
+    // ─── AC-4: per-connection handler attributes offers to the owning rep ─────
+
     [Fact]
-    public async Task GivenAJwtAndBaseUrl_WhenConnectAsyncCalled_ThenBearerTokenIsPassedToHubConnection()
+    public async Task GivenAnOfferOnRep3sConnection_WhenJobOfferReceived_ThenHandlerIsInvokedWithRep3sId()
     {
         // Arrange
-        const string expectedJwt = "eyJhbGciOiJIUzI1NiJ9.test";
-        string? capturedJwt = null;
-        var factoryMock = new Mock<IHubConnectionFactory>();
-        factoryMock
-            .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
-            .Callback<string, string>((_, jwt) => capturedJwt = jwt)
-            .Returns(new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
+        var client = new SignalRClient(Options.Create(DefaultOptions()), WorkingFactory().Object, NullLogger());
+        (string RepId, JobOfferPayload Payload)? received = null;
+        client.RegisterJobOfferHandler((repId, payload) => received = (repId, payload));
 
-        var client = new SignalRClient(
-            Options.Create(DefaultOptions()),
-            factoryMock.Object,
-            NullLogger());
+        var reps = new[]
+        {
+            Rep("rep-1", "token-1", "rep1@dealer.com"),
+            Rep("rep-3", "token-3", "rep3@dealer.com")
+        };
+        await client.ConnectAllAsync(reps, CancellationToken.None);
 
-        // Act
-        await client.ConnectAsync(expectedJwt, CancellationToken.None);
+        // Act — simulate an offer arriving on rep-3's connection
+        client.InvokeJobOfferForTest("rep-3", Offer("offer-x"));
 
         // Assert
-        Assert.Equal(expectedJwt, capturedJwt);
+        Assert.NotNull(received);
+        Assert.Equal("rep-3", received!.Value.RepId);
+        Assert.Equal("offer-x", received.Value.Payload.OfferId);
     }
-
-    // ─── AC-2: Handler registered for "JobOfferReceived" ─────────────────────
 
     [Fact]
-    public async Task GivenARegisteredHandler_WhenConnectAsyncCalled_ThenHandlerIsStoredForJobOfferReceived()
+    public async Task GivenOffersOnTwoRepConnections_WhenEachReceives_ThenEachIsAttributedToItsOwningRep()
     {
         // Arrange
-        var factoryMock = new Mock<IHubConnectionFactory>();
-        factoryMock
-            .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns(new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
+        var client = new SignalRClient(Options.Create(DefaultOptions()), WorkingFactory().Object, NullLogger());
+        var received = new List<(string RepId, string OfferId)>();
+        client.RegisterJobOfferHandler((repId, payload) => received.Add((repId, payload.OfferId)));
 
-        var client = new SignalRClient(
-            Options.Create(DefaultOptions()),
-            factoryMock.Object,
-            NullLogger());
-
-        JobOfferPayload? receivedPayload = null;
-        var expectedPayload = new JobOfferPayload(
-            OfferId: "offer-1", RequestId: "req-1", RequesterName: "Alice",
-            RequesterTier: "Gold", DtcTitle: "P0300", Latitude: 41.5, Longitude: -93.5,
-            DistanceMiles: 10.0, EtaMinutes: 15);
-        client.RegisterJobOfferHandler(p => receivedPayload = p);
+        var reps = new[]
+        {
+            Rep("rep-1", "token-1", "rep1@dealer.com"),
+            Rep("rep-2", "token-2", "rep2@dealer.com")
+        };
+        await client.ConnectAllAsync(reps, CancellationToken.None);
 
         // Act
-        await client.ConnectAsync("test-jwt", CancellationToken.None);
+        client.InvokeJobOfferForTest("rep-1", Offer("offer-1"));
+        client.InvokeJobOfferForTest("rep-2", Offer("offer-2"));
 
-        // Assert — handler is stored and, when invoked, receives the payload
-        Assert.NotNull(client.JobOfferHandlerForTest);
-        client.JobOfferHandlerForTest!(expectedPayload);
-        Assert.Equal(expectedPayload.OfferId, receivedPayload!.OfferId);
+        // Assert
+        Assert.Contains(("rep-1", "offer-1"), received);
+        Assert.Contains(("rep-2", "offer-2"), received);
     }
 
-    // ─── AC-3: Exponential back-off reconnect policy configured ──────────────
+    // ─── Reconnect policy (unchanged) ─────────────────────────────────────────
 
     [Fact]
     public void GivenADefaultHubConnectionFactory_WhenBuilt_ThenReconnectIntervalsAreExponentialBackoff()
@@ -145,71 +163,51 @@ public class SignalRClientTests
             TimeSpan.FromSeconds(30)
         };
 
-        // Act — build a connection; we verify factory exposes the configured intervals
+        // Act
         var intervals = factory.ReconnectIntervals;
 
         // Assert
         Assert.Equal(expectedIntervals, intervals);
     }
 
-    // ─── AC-4: Connection failure logged; no exception propagates ─────────────
+    // ─── Per-connection failure isolation: one rep failing is logged and skipped ─
 
     [Fact]
-    public async Task GivenConnectAsyncThrows_WhenSignalRClientConnects_ThenExceptionIsLoggedAndNotRethrown()
+    public async Task GivenOneRepConnectionThrows_WhenConnectAllAsyncCalled_ThenErrorIsLoggedAndOtherRepsStillConnect()
     {
-        // Arrange
+        // Arrange — rep-1 connects to an unreachable host (StartAsync throws); rep-2 connects fine
         var loggerMock = new Mock<ILogger<SignalRClient>>();
         var factoryMock = new Mock<IHubConnectionFactory>();
-
-        // Build a connection to an unreachable endpoint so StartAsync will throw
         factoryMock
-            .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns(new HubConnectionBuilder()
+            .Setup(f => f.Build(It.IsAny<string>(), "token-bad"))
+            .Returns(() => new HubConnectionBuilder()
                 .WithUrl("http://unreachable-host-that-does-not-exist.invalid/hubs/rep")
                 .Build());
+        factoryMock
+            .Setup(f => f.Build(It.IsAny<string>(), "token-good"))
+            .Returns(() => new HubConnectionBuilder().WithUrl("http://localhost/hubs/rep").Build());
 
-        var client = new SignalRClient(
-            Options.Create(DefaultOptions()),
-            factoryMock.Object,
-            loggerMock.Object);
+        var reps = new[]
+        {
+            Rep("rep-bad", "token-bad", "rep1@dealer.com"),
+            Rep("rep-good", "token-good", "rep2@dealer.com")
+        };
+
+        var client = new SignalRClient(Options.Create(DefaultOptions()), factoryMock.Object, loggerMock.Object);
 
         // Act
         var exception = await Record.ExceptionAsync(
-            () => client.ConnectAsync("test-jwt", CancellationToken.None));
+            () => client.ConnectAllAsync(reps, CancellationToken.None));
 
-        // Assert — no exception propagates
+        // Assert — no exception propagated; an error was logged for the failing connection
         Assert.Null(exception);
-    }
-
-    [Fact]
-    public async Task GivenConnectAsyncThrows_WhenSignalRClientConnects_ThenErrorIsLogged()
-    {
-        // Arrange
-        var loggerMock = new Mock<ILogger<SignalRClient>>();
-        var factoryMock = new Mock<IHubConnectionFactory>();
-
-        factoryMock
-            .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns(new HubConnectionBuilder()
-                .WithUrl("http://unreachable-host-that-does-not-exist.invalid/hubs/rep")
-                .Build());
-
-        var client = new SignalRClient(
-            Options.Create(DefaultOptions()),
-            factoryMock.Object,
-            loggerMock.Object);
-
-        // Act
-        await client.ConnectAsync("test-jwt", CancellationToken.None);
-
-        // Assert — an error was logged
         loggerMock.Verify(
             l => l.Log(
                 LogLevel.Error,
                 It.IsAny<EventId>(),
                 It.IsAny<It.IsAnyType>(),
-                It.IsAny<Exception>(),
+                It.IsAny<Exception?>(),
                 It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.Once);
+            Times.AtLeastOnce);
     }
 }

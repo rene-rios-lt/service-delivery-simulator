@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ServiceDelivery.Simulator.Configuration;
 using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
@@ -23,7 +24,10 @@ public class VehicleWorkerRegistrationTests
                 {
                     ["Simulator:BackendBaseUrl"] = "https://localhost:5001",
                     ["Simulator:SimulatorEmail"] = "simulator@system.internal",
-                    ["Simulator:SimulatorPassword"] = "test-password"
+                    ["Simulator:SimulatorPassword"] = "test-password",
+                    ["Simulator:RepEmails:0"] = "rep1@dealer.com",
+                    ["Simulator:RepEmails:1"] = "rep2@dealer.com",
+                    ["Simulator:RepPassword"] = "rep-password"
                 });
             })
             .ConfigureServices((context, services) =>
@@ -32,6 +36,11 @@ public class VehicleWorkerRegistrationTests
                     context.Configuration.GetSection(SimulatorOptions.SectionName));
 
                 services.AddHttpClient<IBackendApiClient, BackendApiClient>();
+                services.AddSingleton<IIdentitySessionStore>(sp =>
+                    new IdentitySessionStore(
+                        sp.GetRequiredService<IHttpClientFactory>().CreateClient(),
+                        sp.GetRequiredService<IOptions<SimulatorOptions>>(),
+                        sp.GetRequiredService<ILogger<IdentitySessionStore>>()));
                 services.AddSingleton<IHubConnectionFactory, DefaultHubConnectionFactory>();
                 services.AddSingleton<ISignalRClient, SignalRClient>();
 

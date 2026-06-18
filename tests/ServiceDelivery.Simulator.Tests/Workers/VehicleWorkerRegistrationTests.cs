@@ -50,6 +50,12 @@ public class VehicleWorkerRegistrationTests
                 services.AddSingleton<IAutoDecisionEngine, LoggingAutoDecisionEngine>();
                 services.AddSingleton<IFleetClaimCoordinator, FleetClaimCoordinator>();
 
+                // SIM-005 collaborators the FleetReconciler / decision engine depend on.
+                services.AddSingleton<IFleetStateView, FleetStateView>();
+                services.AddSingleton<IDecisionRandomSource, DefaultDecisionRandomSource>();
+                services.AddSingleton<IResponseDelay, TaskResponseDelay>();
+                services.AddSingleton<IJobOfferDecisionEngine, JobOfferDecisionEngine>();
+
                 foreach (var route in IowaRoutes.All)
                 {
                     var capturedRoute = route;

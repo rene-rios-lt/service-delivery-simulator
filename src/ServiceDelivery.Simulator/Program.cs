@@ -38,6 +38,14 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IAutoDecisionEngine, LoggingAutoDecisionEngine>();
         services.AddSingleton<IFleetClaimCoordinator, FleetClaimCoordinator>();
 
+        // SIM-005 offer-triggered auto-response. IFleetStateView is a SINGLETON shared
+        // between the FleetReconciler (writer, once per tick) and the decision engine
+        // (reader, on the SignalR handler thread) — its implementation is thread-safe.
+        services.AddSingleton<IFleetStateView, FleetStateView>();
+        services.AddSingleton<IDecisionRandomSource, DefaultDecisionRandomSource>();
+        services.AddSingleton<IResponseDelay, TaskResponseDelay>();
+        services.AddSingleton<IJobOfferDecisionEngine, JobOfferDecisionEngine>();
+
         // One VehicleWorker drive object per vehicle, fronted by the fleet-wide
         // position driver the reconciler depends on.
         foreach (var route in IowaRoutes.All)

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 
 namespace ServiceDelivery.Simulator.Workers;
@@ -22,17 +23,20 @@ public sealed class SimulatorStartupService : IHostedService
     private readonly IIdentitySessionStore _sessionStore;
     private readonly ISignalRClient _signalRClient;
     private readonly IFleetClaimCoordinator _claimCoordinator;
+    private readonly IJobOfferDecisionEngine _decisionEngine;
     private readonly ILogger<SimulatorStartupService> _logger;
 
     public SimulatorStartupService(
         IIdentitySessionStore sessionStore,
         ISignalRClient signalRClient,
         IFleetClaimCoordinator claimCoordinator,
+        IJobOfferDecisionEngine decisionEngine,
         ILogger<SimulatorStartupService> logger)
     {
         _sessionStore = sessionStore;
         _signalRClient = signalRClient;
         _claimCoordinator = claimCoordinator;
+        _decisionEngine = decisionEngine;
         _logger = logger;
     }
 
@@ -62,6 +66,12 @@ public sealed class SimulatorStartupService : IHostedService
             _logger.LogInformation(
                 "JobOfferReceived for rep {RepId}: OfferId={OfferId}, RequestId={RequestId}, Tier={Tier}",
                 repId, offer.OfferId, offer.RequestId, offer.RequesterTier);
+
+            // SIM-005: delegate the accept/decline decision to the offer-triggered
+            // engine. The SignalR handler is synchronous (Action), so fire-and-forget
+            // the engine task with error isolation — one offer failure must not crash
+            // the hub callback.
+            _ = HandleOfferSafelyAsync(repId, offer);
         });
 
         await _signalRClient.ConnectAllAsync(authenticatedReps, cancellationToken);
@@ -69,6 +79,19 @@ public sealed class SimulatorStartupService : IHostedService
         // AC-4: claim one free vehicle per automated rep so reps are dispatchable
         // Available before the FleetReconciler begins ticking.
         await _claimCoordinator.ClaimInitialVehiclesAsync(cancellationToken);
+    }
+
+    private async Task HandleOfferSafelyAsync(string repId, JobOfferPayload offer)
+    {
+        try
+        {
+            await _decisionEngine.HandleOfferAsync(repId, offer, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex, "Failed to handle job offer {OfferId} for rep {RepId}.", offer.OfferId, repId);
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

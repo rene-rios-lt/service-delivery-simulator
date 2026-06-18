@@ -45,11 +45,21 @@ public class SimulatorStartupServiceTests
         return mock;
     }
 
+    private static Mock<IJobOfferDecisionEngine> DefaultDecisionEngineMock()
+    {
+        var mock = new Mock<IJobOfferDecisionEngine>();
+        mock.Setup(e => e.HandleOfferAsync(It.IsAny<string>(), It.IsAny<JobOfferPayload>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        return mock;
+    }
+
     private static SimulatorStartupService BuildService(
         Mock<IIdentitySessionStore> store,
         Mock<ISignalRClient> signalR,
-        Mock<IFleetClaimCoordinator>? claimCoordinator = null) =>
-        new(store.Object, signalR.Object, (claimCoordinator ?? DefaultClaimCoordinatorMock()).Object, NullLogger());
+        Mock<IFleetClaimCoordinator>? claimCoordinator = null,
+        Mock<IJobOfferDecisionEngine>? decisionEngine = null) =>
+        new(store.Object, signalR.Object, (claimCoordinator ?? DefaultClaimCoordinatorMock()).Object,
+            (decisionEngine ?? DefaultDecisionEngineMock()).Object, NullLogger());
 
     // ─── Ordering: authenticate before connect, register before connect ──────
 
@@ -175,6 +185,35 @@ public class SimulatorStartupServiceTests
         Assert.True(claimIndex >= 0, "ClaimInitialVehiclesAsync was not called");
         Assert.True(connectIndex < claimIndex,
             $"Expected Connect (index {connectIndex}) before Claim (index {claimIndex})");
+    }
+
+    // ─── SIM-005 AC-1: received offers are routed to the decision engine ─────
+
+    [Fact]
+    public async Task GivenAnOfferArrivesOnTheRegisteredHandler_WhenReceived_ThenJobOfferDecisionEngineIsInvokedWithRepIdAndPayload()
+    {
+        // Arrange — capture the handler the startup service registers
+        var store = StoreWith(Simulator(), Rep("rep1@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        Action<string, JobOfferPayload>? registeredHandler = null;
+        var signalR = DefaultSignalRClientMock();
+        signalR.Setup(c => c.RegisterJobOfferHandler(It.IsAny<Action<string, JobOfferPayload>>()))
+            .Callback<Action<string, JobOfferPayload>>(h => registeredHandler = h);
+
+        var decisionEngine = DefaultDecisionEngineMock();
+        var service = BuildService(store, signalR, decisionEngine: decisionEngine);
+        await service.StartAsync(CancellationToken.None);
+
+        var offer = new JobOfferPayload("offer-9", "req-9", "Acme", "Gold", "DTC", 41.6, -93.7, 5, 10);
+
+        // Act — simulate an offer arriving for rep-7
+        Assert.NotNull(registeredHandler);
+        registeredHandler!("rep-7", offer);
+
+        // Assert
+        decisionEngine.Verify(e => e.HandleOfferAsync("rep-7", offer, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     // ─── AC-7: one rep login failure skips only that rep ─────────────────────

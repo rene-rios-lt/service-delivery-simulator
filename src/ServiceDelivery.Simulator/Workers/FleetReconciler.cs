@@ -19,6 +19,7 @@ public sealed class FleetReconciler : BackgroundService
     private readonly IRepOperationGate _operationGate;
     private readonly IVehiclePositionDriver _positionDriver;
     private readonly IAutoDecisionEngine _autoDecisionEngine;
+    private readonly IFleetStateView _fleetStateView;
     private readonly TimeSpan _tickInterval;
     private readonly ILogger<FleetReconciler> _logger;
 
@@ -29,6 +30,7 @@ public sealed class FleetReconciler : BackgroundService
         IRepOperationGate operationGate,
         IVehiclePositionDriver positionDriver,
         IAutoDecisionEngine autoDecisionEngine,
+        IFleetStateView fleetStateView,
         IOptions<SimulatorOptions> options,
         ILogger<FleetReconciler> logger)
     {
@@ -38,6 +40,7 @@ public sealed class FleetReconciler : BackgroundService
         _operationGate = operationGate;
         _positionDriver = positionDriver;
         _autoDecisionEngine = autoDecisionEngine;
+        _fleetStateView = fleetStateView;
         _tickInterval = TimeSpan.FromSeconds(options.Value.PositionUpdateIntervalSeconds);
         _logger = logger;
     }
@@ -45,6 +48,10 @@ public sealed class FleetReconciler : BackgroundService
     public async Task TickAsync(CancellationToken cancellationToken)
     {
         var snapshot = await _apiClient.GetFleetStateAsync(cancellationToken);
+
+        // SIM-005: publish the latest snapshot so the offer-triggered decision engine
+        // can resolve each rep's human-control state when an offer arrives between ticks.
+        _fleetStateView.Publish(snapshot);
 
         await _claimCoordinator.RebalanceAsync(snapshot, cancellationToken);
 

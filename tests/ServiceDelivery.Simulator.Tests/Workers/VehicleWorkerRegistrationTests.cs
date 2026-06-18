@@ -45,6 +45,7 @@ public class VehicleWorkerRegistrationTests
                 services.AddSingleton<IHubConnectionFactory, DefaultHubConnectionFactory>();
                 services.AddSingleton<ISignalRClient, SignalRClient>();
 
+                services.AddSingleton<IYieldedRepRegistry, YieldedRepRegistry>();
                 services.AddSingleton<IVehicleDriveResolver, VehicleDriveResolver>();
                 services.AddSingleton<IRepOperationGate, RepOperationGate>();
                 services.AddSingleton<IStraightLineNavigator, StraightLineNavigator>();

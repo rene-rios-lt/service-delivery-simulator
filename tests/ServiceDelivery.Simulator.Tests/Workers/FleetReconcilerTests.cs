@@ -37,13 +37,128 @@ public class FleetReconcilerTests
         arrivalReporter = new Mock<IArrivalReporter>();
 
         var resolver = new VehicleDriveResolver();
-        var gate = new RepOperationGate();
+        var registry = new YieldedRepRegistry();
+        var gate = new RepOperationGate(registry);
         var options = Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 });
 
         return new FleetReconciler(
             apiClient.Object, coordinator.Object, resolver, gate,
-            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object, options,
+            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object, registry, options,
             NullLogger<FleetReconciler>.Instance);
+    }
+
+    // ─── SIM-009 AC-2 guardrail: position is driven for human/yielded trucks ─────
+
+    [Fact]
+    public async Task GivenAHumanControlledRepEnRoute_WhenTickRuns_ThenItsVehiclePositionIsStillDriven()
+    {
+        // Arrange — a human has accepted and is en route to the requester
+        var humanRow = Row("V-001", "rep-1", RepState.EnRoute, humanControlled: true,
+            location: new RequesterLocation(41.6, -93.7));
+        var reconciler = BuildReconciler(new[] { humanRow }, out _, out _, out var driver, out _, out _, out _);
+
+        // Act
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert — the position engine still navigates the human's truck (never gated)
+        driver.Verify(d => d.DriveAsync(humanRow, VehicleDriveMode.Navigate, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GivenAHumanControlledRepOnSite_WhenTickRuns_ThenItsVehicleIsHeldInPlace()
+    {
+        // Arrange — a human is on site working the job
+        var humanRow = Row("V-001", "rep-1", RepState.OnSite, humanControlled: true,
+            location: new RequesterLocation(41.6, -93.7));
+        var reconciler = BuildReconciler(new[] { humanRow }, out _, out _, out var driver, out _, out _, out _);
+
+        // Act
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert — the truck is held in place, not gated away
+        driver.Verify(d => d.DriveAsync(humanRow, VehicleDriveMode.Hold, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GivenAYieldedRepStillInFleetState_WhenTickRuns_ThenItsVehiclePositionIsStillDriven()
+    {
+        // Arrange — tick 1 records the yield; tick 2 the rep is off-duty but still listed
+        var humanTick = Row("V-001", "rep-1", RepState.EnRoute, humanControlled: true,
+            location: new RequesterLocation(41.6, -93.7));
+        var yieldedTick = Row("V-001", "rep-1", RepState.Available, humanControlled: false);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        var snapshots = new Queue<IReadOnlyList<FleetStateRow>>(new IReadOnlyList<FleetStateRow>[]
+        {
+            new[] { humanTick },
+            new[] { yieldedTick }
+        });
+        apiClient.Setup(c => c.GetFleetStateAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => snapshots.Dequeue());
+
+        var driver = new Mock<IVehiclePositionDriver>();
+        var autoDecision = new Mock<IAutoDecisionEngine>();
+        var registry = new YieldedRepRegistry();
+        var reconciler = new FleetReconciler(
+            apiClient.Object, new Mock<IFleetClaimCoordinator>().Object, new VehicleDriveResolver(),
+            new RepOperationGate(registry), driver.Object, autoDecision.Object,
+            new Mock<IFleetStateView>().Object, new Mock<IArrivalReporter>().Object, registry,
+            Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 }),
+            NullLogger<FleetReconciler>.Instance);
+
+        // Act
+        await reconciler.TickAsync(CancellationToken.None);
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert — position is driven on tick 2 even though decisions are gated off (sticky)
+        driver.Verify(d => d.DriveAsync(yieldedTick, It.IsAny<VehicleDriveMode>(), It.IsAny<CancellationToken>()), Times.Once);
+        autoDecision.Verify(a => a.RunAsync(yieldedTick, It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ─── SIM-009 AC-3: sticky yield survives the human going off-duty ────────────
+
+    [Fact]
+    public async Task GivenARepObservedHumanControlledThenGoneOffDuty_WhenTickRuns_ThenAutoDecisionIsNotInvokedForThatRep()
+    {
+        // Arrange — two ordered snapshots for the same vehicle/rep: tick 1 human-
+        // controlled, tick 2 off-duty (Offline, ClaimingRepId cleared, flag false)
+        var humanTick = Row("V-001", "rep-1", RepState.EnRoute, humanControlled: true,
+            location: new RequesterLocation(41.6, -93.7));
+        var offDutyTick = new FleetStateRow("V-001", ClaimingRepId: null, RepState.Offline,
+            HumanControlled: false, ActiveRequestLocation: null);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        var snapshots = new Queue<IReadOnlyList<FleetStateRow>>(new IReadOnlyList<FleetStateRow>[]
+        {
+            new[] { humanTick },
+            new[] { offDutyTick }
+        });
+        apiClient.Setup(c => c.GetFleetStateAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => snapshots.Dequeue());
+
+        var coordinator = new Mock<IFleetClaimCoordinator>();
+        var driver = new Mock<IVehiclePositionDriver>();
+        var autoDecision = new Mock<IAutoDecisionEngine>();
+        var fleetStateView = new Mock<IFleetStateView>();
+        var arrivalReporter = new Mock<IArrivalReporter>();
+
+        var registry = new YieldedRepRegistry();
+        var reconciler = new FleetReconciler(
+            apiClient.Object, coordinator.Object, new VehicleDriveResolver(), new RepOperationGate(registry),
+            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object, registry,
+            Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 }),
+            NullLogger<FleetReconciler>.Instance);
+
+        // Act — tick 1 records the yield; tick 2 sees the rep off-duty
+        await reconciler.TickAsync(CancellationToken.None);
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert — auto-decision never runs for the rep on either tick (live flag, then sticky)
+        autoDecision.Verify(a => a.RunAsync(humanTick, It.IsAny<CancellationToken>()), Times.Never);
+        autoDecision.Verify(a => a.RunAsync(offDutyTick, It.IsAny<CancellationToken>()), Times.Never);
+
+        // Assert — position is still driven for the off-duty truck (AC-2 guardrail)
+        driver.Verify(d => d.DriveAsync(offDutyTick, It.IsAny<VehicleDriveMode>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

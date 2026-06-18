@@ -21,6 +21,7 @@ public sealed class FleetReconciler : BackgroundService
     private readonly IAutoDecisionEngine _autoDecisionEngine;
     private readonly IFleetStateView _fleetStateView;
     private readonly IArrivalReporter _arrivalReporter;
+    private readonly IYieldedRepRegistry _yieldedReps;
     private readonly TimeSpan _tickInterval;
     private readonly ILogger<FleetReconciler> _logger;
 
@@ -33,6 +34,7 @@ public sealed class FleetReconciler : BackgroundService
         IAutoDecisionEngine autoDecisionEngine,
         IFleetStateView fleetStateView,
         IArrivalReporter arrivalReporter,
+        IYieldedRepRegistry yieldedReps,
         IOptions<SimulatorOptions> options,
         ILogger<FleetReconciler> logger)
     {
@@ -44,6 +46,7 @@ public sealed class FleetReconciler : BackgroundService
         _autoDecisionEngine = autoDecisionEngine;
         _fleetStateView = fleetStateView;
         _arrivalReporter = arrivalReporter;
+        _yieldedReps = yieldedReps;
         _tickInterval = TimeSpan.FromSeconds(options.Value.PositionUpdateIntervalSeconds);
         _logger = logger;
     }
@@ -62,6 +65,11 @@ public sealed class FleetReconciler : BackgroundService
         {
             var mode = _driveResolver.Resolve(row);
             await _positionDriver.DriveAsync(row, mode, cancellationToken);
+
+            // SIM-009: record a yield the moment a row is first seen human-controlled,
+            // AFTER position drive (which is never gated) and BEFORE the operation gate
+            // so the gate's read reflects this tick's observation. Sticky for the run.
+            _yieldedReps.ObserveAndRecordIfYielded(row);
 
             if (_operationGate.ShouldOperate(row))
             {

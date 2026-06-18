@@ -30,6 +30,11 @@ public class FleetClaimCoordinatorTests
         return store;
     }
 
+    private static FleetClaimCoordinator Build(
+        Mock<IIdentitySessionStore> store, Mock<IBackendApiClient> apiClient, IYieldedRepRegistry? registry = null) =>
+        new(store.Object, apiClient.Object, registry ?? new YieldedRepRegistry(),
+            NullLogger<FleetClaimCoordinator>.Instance);
+
     [Fact]
     public async Task GivenAutomatedReps_WhenClaimInitialVehiclesAsyncRuns_ThenEachRepClaimsOneFreeVehicle()
     {
@@ -48,7 +53,7 @@ public class FleetClaimCoordinatorTests
             .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(() => available.Dequeue());
 
-        var coordinator = new FleetClaimCoordinator(store.Object, apiClient.Object, NullLogger<FleetClaimCoordinator>.Instance);
+        var coordinator = Build(store, apiClient);
 
         // Act
         await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
@@ -71,7 +76,7 @@ public class FleetClaimCoordinatorTests
             .Setup(c => c.GetAvailableVehicleIdsAsync(rep2, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { "V-007" });
 
-        var coordinator = new FleetClaimCoordinator(store.Object, apiClient.Object, NullLogger<FleetClaimCoordinator>.Instance);
+        var coordinator = Build(store, apiClient);
 
         var snapshot = new[]
         {
@@ -96,7 +101,7 @@ public class FleetClaimCoordinatorTests
         var store = StoreWith(rep1, rep2);
 
         var apiClient = new Mock<IBackendApiClient>();
-        var coordinator = new FleetClaimCoordinator(store.Object, apiClient.Object, NullLogger<FleetClaimCoordinator>.Instance);
+        var coordinator = Build(store, apiClient);
 
         var snapshot = new[]
         {
@@ -111,5 +116,60 @@ public class FleetClaimCoordinatorTests
         apiClient.Verify(
             c => c.ClaimVehicleAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()),
             Times.Never);
+    }
+
+    // ─── SIM-009 AC-4: yielded reps and vehicles are excluded from rebalancing ───
+
+    [Fact]
+    public async Task GivenAYieldedRep_WhenRebalanceRuns_ThenNoVehicleIsClaimedForThatRep()
+    {
+        // Arrange — rep-1 was yielded to a human; it currently holds no vehicle
+        var rep1 = Rep("rep-1");
+        var store = StoreWith(rep1);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-005" });
+
+        var registry = new YieldedRepRegistry();
+        registry.ObserveAndRecordIfYielded(
+            new FleetStateRow("V-001", "rep-1", RepState.Available, HumanControlled: true, ActiveRequestLocation: null));
+        var coordinator = Build(store, apiClient, registry);
+
+        var snapshot = new[] { Row("V-005", claimingRepId: null) };
+
+        // Act
+        await coordinator.RebalanceAsync(snapshot, CancellationToken.None);
+
+        // Assert — the yielded rep is never given a claim
+        apiClient.Verify(c => c.ClaimVehicleAsync(It.IsAny<string>(), rep1, It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GivenAYieldedVehicle_WhenRebalanceRuns_ThenThatVehicleIsNotClaimed()
+    {
+        // Arrange — rep-2 is operable and holds nothing; the only free vehicle (V-009)
+        // was yielded with its rep when a human took it "home for the night"
+        var rep2 = Rep("rep-2");
+        var store = StoreWith(rep2);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(rep2, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-009" });
+
+        var registry = new YieldedRepRegistry();
+        registry.ObserveAndRecordIfYielded(
+            new FleetStateRow("V-009", "rep-1", RepState.Available, HumanControlled: true, ActiveRequestLocation: null));
+        var coordinator = Build(store, apiClient, registry);
+
+        var snapshot = new[] { Row("V-009", claimingRepId: null) };
+
+        // Act
+        await coordinator.RebalanceAsync(snapshot, CancellationToken.None);
+
+        // Assert — the yielded vehicle is never re-claimed by anyone
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-009", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

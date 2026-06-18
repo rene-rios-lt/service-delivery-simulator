@@ -23,7 +23,8 @@ public class FleetReconcilerTests
         out Mock<IBackendApiClient> apiClient,
         out Mock<IFleetClaimCoordinator> coordinator,
         out Mock<IVehiclePositionDriver> driver,
-        out Mock<IAutoDecisionEngine> autoDecision)
+        out Mock<IAutoDecisionEngine> autoDecision,
+        out Mock<IFleetStateView> fleetStateView)
     {
         apiClient = new Mock<IBackendApiClient>();
         apiClient.Setup(c => c.GetFleetStateAsync(It.IsAny<CancellationToken>())).ReturnsAsync(snapshot);
@@ -31,6 +32,7 @@ public class FleetReconcilerTests
         coordinator = new Mock<IFleetClaimCoordinator>();
         driver = new Mock<IVehiclePositionDriver>();
         autoDecision = new Mock<IAutoDecisionEngine>();
+        fleetStateView = new Mock<IFleetStateView>();
 
         var resolver = new VehicleDriveResolver();
         var gate = new RepOperationGate();
@@ -38,7 +40,8 @@ public class FleetReconcilerTests
 
         return new FleetReconciler(
             apiClient.Object, coordinator.Object, resolver, gate,
-            driver.Object, autoDecision.Object, options, NullLogger<FleetReconciler>.Instance);
+            driver.Object, autoDecision.Object, fleetStateView.Object, options,
+            NullLogger<FleetReconciler>.Instance);
     }
 
     [Fact]
@@ -46,7 +49,7 @@ public class FleetReconcilerTests
     {
         // Arrange
         var snapshot = new[] { Row("V-001", "rep-1"), Row("V-002", "rep-2") };
-        var reconciler = BuildReconciler(snapshot, out var apiClient, out _, out _, out _);
+        var reconciler = BuildReconciler(snapshot, out var apiClient, out _, out _, out _, out _);
 
         // Act
         await reconciler.TickAsync(CancellationToken.None);
@@ -61,7 +64,7 @@ public class FleetReconcilerTests
         // Arrange
         var rowA = Row("V-001", "rep-1", RepState.Available);
         var rowB = Row("V-002", "rep-2", RepState.OnSite, location: new RequesterLocation(41.6, -93.7));
-        var reconciler = BuildReconciler(new[] { rowA, rowB }, out _, out _, out var driver, out _);
+        var reconciler = BuildReconciler(new[] { rowA, rowB }, out _, out _, out var driver, out _, out _);
 
         // Act
         await reconciler.TickAsync(CancellationToken.None);
@@ -76,7 +79,7 @@ public class FleetReconcilerTests
     {
         // Arrange
         var humanRow = Row("V-001", "rep-1", humanControlled: true);
-        var reconciler = BuildReconciler(new[] { humanRow }, out _, out _, out _, out var autoDecision);
+        var reconciler = BuildReconciler(new[] { humanRow }, out _, out _, out _, out var autoDecision, out _);
 
         // Act
         await reconciler.TickAsync(CancellationToken.None);
@@ -90,7 +93,7 @@ public class FleetReconcilerTests
     {
         // Arrange
         var row = Row("V-001", "rep-1", humanControlled: false);
-        var reconciler = BuildReconciler(new[] { row }, out _, out _, out _, out var autoDecision);
+        var reconciler = BuildReconciler(new[] { row }, out _, out _, out _, out var autoDecision, out _);
 
         // Act
         await reconciler.TickAsync(CancellationToken.None);
@@ -104,13 +107,29 @@ public class FleetReconcilerTests
     {
         // Arrange
         var snapshot = new[] { Row("V-001", "rep-1") };
-        var reconciler = BuildReconciler(snapshot, out _, out var coordinator, out _, out _);
+        var reconciler = BuildReconciler(snapshot, out _, out var coordinator, out _, out _, out _);
 
         // Act
         await reconciler.TickAsync(CancellationToken.None);
 
         // Assert
         coordinator.Verify(c => c.RebalanceAsync(snapshot, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    // ─── SIM-005 AC-1 plumbing: each tick publishes the snapshot for the offer engine ─
+
+    [Fact]
+    public async Task GivenAReconciler_WhenTickRuns_ThenTheReadSnapshotIsPublishedIntoTheFleetStateView()
+    {
+        // Arrange
+        var snapshot = new[] { Row("V-001", "rep-1"), Row("V-002", "rep-2") };
+        var reconciler = BuildReconciler(snapshot, out _, out _, out _, out _, out var fleetStateView);
+
+        // Act
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert
+        fleetStateView.Verify(v => v.Publish(snapshot), Times.Once);
     }
 
     // ─── AC-1: the recurring tick reads fleet-state at least once when running ─
@@ -120,7 +139,7 @@ public class FleetReconcilerTests
     {
         // Arrange
         var snapshot = new[] { Row("V-001", "rep-1") };
-        var reconciler = BuildReconciler(snapshot, out var apiClient, out _, out _, out _);
+        var reconciler = BuildReconciler(snapshot, out var apiClient, out _, out _, out _, out _);
         using var cts = new CancellationTokenSource();
         apiClient
             .Setup(c => c.GetFleetStateAsync(It.IsAny<CancellationToken>()))
@@ -140,7 +159,7 @@ public class FleetReconcilerTests
     {
         // Arrange
         var snapshot = new[] { Row("V-001", "rep-1") };
-        var reconciler = BuildReconciler(snapshot, out _, out _, out _, out _);
+        var reconciler = BuildReconciler(snapshot, out _, out _, out _, out _, out _);
         using var cts = new CancellationTokenSource();
 
         // Act

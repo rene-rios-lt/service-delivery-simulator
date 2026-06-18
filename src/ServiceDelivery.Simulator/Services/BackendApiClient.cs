@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using ServiceDelivery.Simulator.Models;
 
@@ -67,6 +69,43 @@ public sealed class BackendApiClient : IBackendApiClient
             _logger.LogError(
                 "POST /job-offers/{OfferId}/{Action} returned {StatusCode} for rep {RepId}.",
                 offerId, action, response.StatusCode, rep.RepId);
+    }
+
+    private static readonly JsonSerializerOptions FleetStateJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    public Task<IReadOnlyList<FleetStateRow>> GetFleetStateAsync(CancellationToken cancellationToken) =>
+        GetJsonAsync<FleetStateRow>(_sessionStore.Simulator, "/simulator/fleet-state", cancellationToken);
+
+    public Task<IReadOnlyList<string>> GetAvailableVehicleIdsAsync(
+        RepIdentity rep, CancellationToken cancellationToken) =>
+        GetJsonAsync<string>(rep, "/vehicles/available", cancellationToken);
+
+    public async Task ClaimVehicleAsync(string vehicleId, RepIdentity rep, CancellationToken cancellationToken)
+    {
+        var token = await _sessionStore.GetValidTokenAsync(rep, cancellationToken);
+        using var request = BuildAuthorizedRequest(HttpMethod.Post, $"/vehicles/{vehicleId}/claim", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+            _logger.LogError(
+                "POST /vehicles/{VehicleId}/claim returned {StatusCode} for rep {RepId}.",
+                vehicleId, response.StatusCode, rep.RepId);
+    }
+
+    private async Task<IReadOnlyList<T>> GetJsonAsync<T>(
+        RepIdentity identity, string relativeUri, CancellationToken cancellationToken)
+    {
+        var token = await _sessionStore.GetValidTokenAsync(identity, cancellationToken);
+        using var request = BuildAuthorizedRequest(HttpMethod.Get, relativeUri, token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var items = await response.Content.ReadFromJsonAsync<List<T>>(FleetStateJsonOptions, cancellationToken);
+        return items ?? [];
     }
 
     private async Task<HttpResponseMessage> SendPositionAsync(

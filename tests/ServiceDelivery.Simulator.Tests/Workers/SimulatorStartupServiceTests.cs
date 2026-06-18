@@ -37,6 +37,20 @@ public class SimulatorStartupServiceTests
     private static ILogger<SimulatorStartupService> NullLogger() =>
         new Mock<ILogger<SimulatorStartupService>>().Object;
 
+    private static Mock<IFleetClaimCoordinator> DefaultClaimCoordinatorMock()
+    {
+        var mock = new Mock<IFleetClaimCoordinator>();
+        mock.Setup(c => c.ClaimInitialVehiclesAsync(It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        return mock;
+    }
+
+    private static SimulatorStartupService BuildService(
+        Mock<IIdentitySessionStore> store,
+        Mock<ISignalRClient> signalR,
+        Mock<IFleetClaimCoordinator>? claimCoordinator = null) =>
+        new(store.Object, signalR.Object, (claimCoordinator ?? DefaultClaimCoordinatorMock()).Object, NullLogger());
+
     // ─── Ordering: authenticate before connect, register before connect ──────
 
     [Fact]
@@ -56,7 +70,7 @@ public class SimulatorStartupServiceTests
             .Callback(() => callOrder.Add("Connect"))
             .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         await service.StartAsync(CancellationToken.None);
@@ -86,7 +100,7 @@ public class SimulatorStartupServiceTests
             .Callback(() => callOrder.Add("Connect"))
             .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         await service.StartAsync(CancellationToken.None);
@@ -116,7 +130,7 @@ public class SimulatorStartupServiceTests
             .Callback<IEnumerable<RepIdentity>, CancellationToken>((reps, _) => connectedReps = reps.ToList())
             .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         await service.StartAsync(CancellationToken.None);
@@ -125,6 +139,42 @@ public class SimulatorStartupServiceTests
         Assert.NotNull(connectedReps);
         Assert.Contains(rep1, connectedReps!);
         Assert.Contains(rep2, connectedReps!);
+    }
+
+    // ─── SIM-008 AC-4: startup claims initial vehicles after SignalR connect ──
+
+    [Fact]
+    public async Task GivenStartupService_WhenStartAsyncRuns_ThenInitialVehiclesAreClaimedAfterConnect()
+    {
+        // Arrange
+        var callOrder = new List<string>();
+        var store = StoreWith(Simulator(), Rep("rep1@dealer.com"));
+        store.Setup(s => s.AuthenticateAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var signalR = new Mock<ISignalRClient>();
+        signalR.Setup(c => c.ConnectAllAsync(It.IsAny<IEnumerable<RepIdentity>>(), It.IsAny<CancellationToken>()))
+            .Callback(() => callOrder.Add("Connect"))
+            .Returns(Task.CompletedTask);
+
+        var claimCoordinator = new Mock<IFleetClaimCoordinator>();
+        claimCoordinator.Setup(c => c.ClaimInitialVehiclesAsync(It.IsAny<CancellationToken>()))
+            .Callback(() => callOrder.Add("Claim"))
+            .Returns(Task.CompletedTask);
+
+        var service = BuildService(store, signalR, claimCoordinator);
+
+        // Act
+        await service.StartAsync(CancellationToken.None);
+
+        // Assert
+        claimCoordinator.Verify(c => c.ClaimInitialVehiclesAsync(It.IsAny<CancellationToken>()), Times.Once);
+        var connectIndex = callOrder.IndexOf("Connect");
+        var claimIndex = callOrder.IndexOf("Claim");
+        Assert.True(connectIndex >= 0, "ConnectAllAsync was not called");
+        Assert.True(claimIndex >= 0, "ClaimInitialVehiclesAsync was not called");
+        Assert.True(connectIndex < claimIndex,
+            $"Expected Connect (index {connectIndex}) before Claim (index {claimIndex})");
     }
 
     // ─── AC-7: one rep login failure skips only that rep ─────────────────────
@@ -143,7 +193,7 @@ public class SimulatorStartupServiceTests
         store.Setup(s => s.AuthenticateAsync(rep2, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
         var signalR = DefaultSignalRClientMock();
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         var exception = await Record.ExceptionAsync(() => service.StartAsync(CancellationToken.None));
@@ -172,7 +222,7 @@ public class SimulatorStartupServiceTests
             .Callback<IEnumerable<RepIdentity>, CancellationToken>((reps, _) => connectedReps = reps.ToList())
             .Returns(Task.CompletedTask);
 
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         await service.StartAsync(CancellationToken.None);
@@ -194,7 +244,7 @@ public class SimulatorStartupServiceTests
             .Returns(Task.CompletedTask);
 
         var signalR = DefaultSignalRClientMock();
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         var exception = await Record.ExceptionAsync(() => service.StartAsync(CancellationToken.None));
@@ -218,7 +268,7 @@ public class SimulatorStartupServiceTests
             .ThrowsAsync(new AuthenticationException("simulator login failed"));
 
         var signalR = DefaultSignalRClientMock();
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act & Assert — the exception propagates so the host aborts startup
         await Assert.ThrowsAsync<AuthenticationException>(() => service.StartAsync(CancellationToken.None));
@@ -234,7 +284,7 @@ public class SimulatorStartupServiceTests
             .ThrowsAsync(new AuthenticationException("simulator login failed"));
 
         var signalR = DefaultSignalRClientMock();
-        var service = new SimulatorStartupService(store.Object, signalR.Object, NullLogger());
+        var service = BuildService(store, signalR);
 
         // Act
         await Record.ExceptionAsync(() => service.StartAsync(CancellationToken.None));

@@ -7,6 +7,10 @@ using Xunit;
 
 namespace ServiceDelivery.Simulator.Tests.Workers;
 
+// Under SIM-008 topology A the VehicleWorker is a plain per-vehicle drive object: the
+// FleetReconciler supplies its fleet-state row + resolved drive mode each tick and the
+// worker posts the resulting position. The IdleLoop branch preserves the SIM-004
+// loop-advance behaviour; Navigate/Hold geometry is owned by SIM-006.
 public class VehicleWorkerRouteTests
 {
     private static VehicleRoute BuildTestRoute(int waypointCount = 6) =>
@@ -21,10 +25,13 @@ public class VehicleWorkerRouteTests
     private static ILogger<VehicleWorker> NullLogger() =>
         new Mock<ILogger<VehicleWorker>>().Object;
 
-    // ─── AC-2: Position advances one waypoint per tick ───────────────────────
+    private static FleetStateRow IdleRow(string vehicleId = "V-TEST") =>
+        new(vehicleId, "rep-1", RepState.Available, HumanControlled: false, ActiveRequestLocation: null);
+
+    // ─── AC-2: IdleLoop mode advances one waypoint per drive and posts it ─────
 
     [Fact]
-    public async Task GivenAVehicleWorkerAtWaypointZero_WhenTickExecutes_ThenPositionAdvancesToWaypointOne()
+    public async Task GivenIdleLoopMode_WhenWorkerDrives_ThenPositionAdvancesAlongLoop()
     {
         // Arrange
         var route = BuildTestRoute();
@@ -39,7 +46,7 @@ public class VehicleWorkerRouteTests
         var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
 
         // Act
-        await worker.TickAsync(CancellationToken.None);
+        await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
 
         // Assert
         Assert.NotNull(capturedPosition);
@@ -53,7 +60,7 @@ public class VehicleWorkerRouteTests
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
-    public async Task GivenAVehicleWorkerAtWaypointN_WhenTickExecutes_ThenPositionAdvancesToWaypointNPlusOne(int startIndex)
+    public async Task GivenIdleLoopModeAtWaypointN_WhenWorkerDrives_ThenPositionAdvancesToWaypointNPlusOne(int startIndex)
     {
         // Arrange
         var route = BuildTestRoute(waypointCount: 6);
@@ -70,11 +77,11 @@ public class VehicleWorkerRouteTests
         // Advance to the desired start index
         for (int i = 0; i < startIndex; i++)
         {
-            await worker.TickAsync(CancellationToken.None);
+            await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
         }
 
-        // Act — one more tick from startIndex
-        await worker.TickAsync(CancellationToken.None);
+        // Act — one more drive from startIndex
+        await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
 
         // Assert
         var expectedWaypoint = route.Waypoints[startIndex + 1];
@@ -83,10 +90,10 @@ public class VehicleWorkerRouteTests
         Assert.Equal(expectedWaypoint.Longitude, capturedPosition.Longitude);
     }
 
-    // ─── AC-3: Wrap from last waypoint back to first ──────────────────────────
+    // ─── AC-2: wrap from last waypoint back to first in IdleLoop mode ─────────
 
     [Fact]
-    public async Task GivenAVehicleWorkerAtLastWaypoint_WhenTickExecutes_ThenPositionWrapsToFirstWaypoint()
+    public async Task GivenIdleLoopModeAtLastWaypoint_WhenWorkerDrives_ThenPositionWrapsToFirstWaypoint()
     {
         // Arrange
         var route = BuildTestRoute(waypointCount: 3);
@@ -101,11 +108,11 @@ public class VehicleWorkerRouteTests
         var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
 
         // Advance to the last waypoint (index 2 of 3)
-        await worker.TickAsync(CancellationToken.None); // index 0 → 1
-        await worker.TickAsync(CancellationToken.None); // index 1 → 2 (last)
+        await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None); // 0 → 1
+        await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None); // 1 → 2 (last)
 
-        // Act — tick from the last waypoint should wrap to index 0
-        await worker.TickAsync(CancellationToken.None);
+        // Act — drive from the last waypoint should wrap to index 0
+        await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
 
         // Assert
         var firstWaypoint = route.Waypoints[0];
@@ -114,10 +121,10 @@ public class VehicleWorkerRouteTests
         Assert.Equal(firstWaypoint.Longitude, capturedPosition.Longitude);
     }
 
-    // ─── AC-1 (SIM-004): POST /vehicles/{id}/position called with correct payload ─
+    // ─── AC-2: IdleLoop drive posts to the position endpoint with the right payload ─
 
     [Fact]
-    public async Task GivenAVehicleAtCurrentPosition_WhenTickExecutes_ThenPostPositionAsyncCalledWithCorrectPayload()
+    public async Task GivenIdleLoopMode_WhenWorkerDrives_ThenPostPositionAsyncCalledWithCorrectPayload()
     {
         // Arrange
         var route = BuildTestRoute();
@@ -137,7 +144,7 @@ public class VehicleWorkerRouteTests
         var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
 
         // Act
-        await worker.TickAsync(CancellationToken.None);
+        await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
 
         // Assert
         Assert.Equal(1, callCount);
@@ -147,10 +154,10 @@ public class VehicleWorkerRouteTests
         Assert.Equal(route.Waypoints[1].Longitude, capturedPosition.Longitude);
     }
 
-    // ─── AC-4 (SIM-004): Transient network failure is caught, logged, worker continues ─
+    // ─── A transient network failure on drive is caught, logged, and swallowed ─
 
     [Fact]
-    public async Task GivenPostPositionThrowsNetworkException_WhenTickExecutes_ThenWorkerCatchesAndContinues()
+    public async Task GivenPostPositionThrowsNetworkException_WhenWorkerDrives_ThenWorkerCatchesAndContinues()
     {
         // Arrange
         var route = BuildTestRoute();
@@ -163,9 +170,9 @@ public class VehicleWorkerRouteTests
 
         var worker = new VehicleWorker(route, apiClientMock.Object, loggerMock.Object);
 
-        // Act — TickAsync should not throw despite PostPositionAsync throwing
+        // Act — DriveAsync should not throw despite PostPositionAsync throwing
         var exception = await Record.ExceptionAsync(
-            () => worker.TickAsync(CancellationToken.None));
+            () => worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None));
 
         // Assert — no exception propagated; error was logged
         Assert.Null(exception);
@@ -177,32 +184,5 @@ public class VehicleWorkerRouteTests
                 It.Is<Exception>(ex => ex is HttpRequestException),
                 It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
             Times.Once);
-    }
-
-    // ─── AC-5: Cancellation token respected ──────────────────────────────────
-
-    [Fact]
-    public async Task GivenARunningVehicleWorker_WhenCancellationRequested_ThenWorkerExitsCleanly()
-    {
-        // Arrange
-        var route = BuildTestRoute();
-        var cts = new CancellationTokenSource();
-
-        var apiClientMock = new Mock<IBackendApiClient>();
-        apiClientMock
-            .Setup(c => c.PostPositionAsync(It.IsAny<VehiclePosition>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
-
-        var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
-
-        // Act — start the worker, then cancel
-        var workerTask = worker.StartAsync(cts.Token);
-        await cts.CancelAsync();
-
-        // Assert — the task completes within 5 seconds and does not throw
-        var exception = await Record.ExceptionAsync(
-            () => workerTask.WaitAsync(TimeSpan.FromSeconds(5)));
-
-        Assert.Null(exception);
     }
 }

@@ -13,21 +13,26 @@ namespace ServiceDelivery.Simulator.Workers;
 //   3. Register the rep-aware job-offer handler (the SIM-005 seam: it only logs
 //      which rep received which offer — no accept/decline decision lives here).
 //   4. Connect every successfully-authenticated rep's RepHub.
+//   5. Claim one free vehicle per automated rep (SIM-008 AC-4) so reps are
+//      dispatchable before the FleetReconciler ticks.
 // Implements IHostedService directly so the host awaits StartAsync before the
-// VehicleWorkers begin posting positions.
+// FleetReconciler begins driving positions.
 public sealed class SimulatorStartupService : IHostedService
 {
     private readonly IIdentitySessionStore _sessionStore;
     private readonly ISignalRClient _signalRClient;
+    private readonly IFleetClaimCoordinator _claimCoordinator;
     private readonly ILogger<SimulatorStartupService> _logger;
 
     public SimulatorStartupService(
         IIdentitySessionStore sessionStore,
         ISignalRClient signalRClient,
+        IFleetClaimCoordinator claimCoordinator,
         ILogger<SimulatorStartupService> logger)
     {
         _sessionStore = sessionStore;
         _signalRClient = signalRClient;
+        _claimCoordinator = claimCoordinator;
         _logger = logger;
     }
 
@@ -60,6 +65,10 @@ public sealed class SimulatorStartupService : IHostedService
         });
 
         await _signalRClient.ConnectAllAsync(authenticatedReps, cancellationToken);
+
+        // AC-4: claim one free vehicle per automated rep so reps are dispatchable
+        // Available before the FleetReconciler begins ticking.
+        await _claimCoordinator.ClaimInitialVehiclesAsync(cancellationToken);
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

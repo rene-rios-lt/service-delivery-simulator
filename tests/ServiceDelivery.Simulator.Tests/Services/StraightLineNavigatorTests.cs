@@ -1,3 +1,4 @@
+using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 using Xunit;
 
@@ -7,6 +8,69 @@ namespace ServiceDelivery.Simulator.Tests.Services;
 // toward the target, Haversine arrival threshold, and snap-to-target on arrival.
 public class StraightLineNavigatorTests
 {
+    // ─── SIM-007 AC-1: nearest-waypoint selection by Haversine distance ───────
+
+    [Fact]
+    public void GivenACurrentPositionAndWaypointSet_WhenNearestWaypointIndexRequested_ThenReturnsTheHaversineNearestWaypoint()
+    {
+        // Arrange — a current position sitting almost exactly on waypoint index 3,
+        // and far from the rest of the set
+        var navigator = new StraightLineNavigator();
+        var waypoints = Enumerable.Range(0, 6)
+            .Select(i => new RouteWaypoint(41.0 + i * 0.1, -93.0 + i * 0.1))
+            .ToList();
+        double currentLat = waypoints[3].Latitude + 0.001;
+        double currentLng = waypoints[3].Longitude + 0.001;
+
+        // Act
+        int nearest = navigator.NearestWaypointIndex(currentLat, currentLng, waypoints);
+
+        // Assert — the returned index is the one with the minimum Haversine distance
+        int expected = 0;
+        double best = double.MaxValue;
+        for (int i = 0; i < waypoints.Count; i++)
+        {
+            double d = HaversineMeters(currentLat, currentLng, waypoints[i].Latitude, waypoints[i].Longitude);
+            if (d < best) { best = d; expected = i; }
+        }
+        Assert.Equal(expected, nearest);
+        Assert.Equal(3, nearest);
+    }
+
+    [Fact]
+    public void GivenASingleWaypoint_WhenNearestWaypointIndexRequested_ThenReturnsThatWaypointIndex()
+    {
+        // Arrange — a one-element waypoint set
+        var navigator = new StraightLineNavigator();
+        var waypoints = new List<RouteWaypoint> { new(41.5, -93.6) };
+
+        // Act
+        int nearest = navigator.NearestWaypointIndex(40.0, -95.0, waypoints);
+
+        // Assert
+        Assert.Equal(0, nearest);
+    }
+
+    [Fact]
+    public void GivenTwoEquidistantWaypoints_WhenNearestWaypointIndexRequested_ThenReturnsTheFirstIndex()
+    {
+        // Arrange — the current position is exactly midway between two waypoints, so
+        // both are equidistant; the first (lowest) index must win
+        var navigator = new StraightLineNavigator();
+        var waypoints = new List<RouteWaypoint>
+        {
+            new(41.0, -93.0),
+            new(41.0, -93.2)
+        };
+        double currentLat = 41.0, currentLng = -93.1;
+
+        // Act
+        int nearest = navigator.NearestWaypointIndex(currentLat, currentLng, waypoints);
+
+        // Assert
+        Assert.Equal(0, nearest);
+    }
+
     private static double HaversineMeters(double lat1, double lng1, double lat2, double lng2)
     {
         const double earthRadiusMeters = 6_371_000.0;

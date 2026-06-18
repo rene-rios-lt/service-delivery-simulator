@@ -29,6 +29,12 @@ public sealed class VehicleWorker
     private double? _lastLat;
     private double? _lastLng;
 
+    // SIM-007: true when the previous drive tick was a non-loop mode (Navigate/Hold),
+    // i.e. the vehicle was on a job excursion. Consumed by the IdleLoop branch so the
+    // first Available loop tick after an excursion reattaches to the nearest waypoint
+    // instead of blindly advancing the stale loop index.
+    private bool _wasOnExcursionLastTick;
+
     public VehicleWorker(
         VehicleRoute route,
         IBackendApiClient apiClient,
@@ -60,15 +66,17 @@ public sealed class VehicleWorker
         switch (mode)
         {
             case VehicleDriveMode.IdleLoop:
-                await PostLoopPositionAsync(cancellationToken);
+                await PostLoopPositionAsync(row, cancellationToken);
                 break;
 
             case VehicleDriveMode.Navigate:
                 await PostNavigateStepAsync(row, cancellationToken);
+                _wasOnExcursionLastTick = true;
                 break;
 
             case VehicleDriveMode.Hold:
                 await PostHoldPositionAsync(row, cancellationToken);
+                _wasOnExcursionLastTick = true;
                 break;
 
             default:
@@ -76,9 +84,31 @@ public sealed class VehicleWorker
         }
     }
 
-    private async Task PostLoopPositionAsync(CancellationToken cancellationToken)
+    private async Task PostLoopPositionAsync(FleetStateRow row, CancellationToken cancellationToken)
     {
-        _waypointIndex = (_waypointIndex + 1) % _route.Waypoints.Count;
+        // AC-4: VehicleDriveResolver maps an Offline (parked / off-duty) row to IdleLoop,
+        // so mode alone cannot tell "job done → resume loop" apart from "human off-duty →
+        // park". Gate all loop action on Available: for a parked row take no action — no
+        // reattach, no index advance, no moved position — leaving parking to SIM-009.
+        if (row.RepState != RepState.Available)
+            return;
+
+        // AC-1/AC-2/AC-3: first loop tick after a Navigate/Hold excursion reattaches to
+        // the Haversine-nearest waypoint and clears cached job-nav state, rather than
+        // blindly advancing the stale loop index.
+        if (_wasOnExcursionLastTick)
+        {
+            var (currentLat, currentLng) = CurrentPosition();
+            _waypointIndex = _navigator.NearestWaypointIndex(currentLat, currentLng, _route.Waypoints);
+            _wasOnExcursionLastTick = false;
+            _lastLat = null;
+            _lastLng = null;
+        }
+        else
+        {
+            _waypointIndex = (_waypointIndex + 1) % _route.Waypoints.Count;
+        }
+
         var waypoint = _route.Waypoints[_waypointIndex];
         await PostPositionAsync(waypoint.Latitude, waypoint.Longitude, cancellationToken);
     }

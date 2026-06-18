@@ -50,6 +50,24 @@ public sealed class StraightLineNavigator : IStraightLineNavigator
     public bool HasReached(double currentLat, double currentLng, double targetLat, double targetLng) =>
         HaversineMeters(currentLat, currentLng, targetLat, targetLng) <= ArrivalThresholdMeters;
 
+    public int NearestWaypointIndex(double currentLat, double currentLng, IReadOnlyList<RouteWaypoint> waypoints)
+    {
+        int nearestIndex = 0;
+        double nearestDistance = double.MaxValue;
+
+        for (int i = 0; i < waypoints.Count; i++)
+        {
+            double distance = HaversineMeters(currentLat, currentLng, waypoints[i].Latitude, waypoints[i].Longitude);
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearestIndex = i;
+            }
+        }
+
+        return nearestIndex;
+    }
+
     private static double HaversineMeters(double lat1, double lng1, double lat2, double lng2)
     {
         double dLat = ToRadians(lat2 - lat1);

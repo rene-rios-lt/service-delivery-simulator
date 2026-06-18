@@ -163,10 +163,13 @@ public class VehicleWorkerNavigationTests
         api.Verify(c => c.ArriveAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    // ─── AC-4: loop traversal is suspended while navigating ───────────────────
+    // ─── SIM-007 reattach: the first IdleLoop tick after a Navigate excursion ──
+    // reattaches to the Haversine-nearest waypoint rather than blindly advancing the
+    // stale loop index. Here the worker advances ~260 m north of waypoint[0], so the
+    // nearest waypoint is waypoint[0] — NOT the pre-SIM-007 blind-advance waypoint[1].
 
     [Fact]
-    public async Task GivenNavigateMode_WhenWorkerDrives_ThenLoopWaypointIndexDoesNotAdvance()
+    public async Task GivenNavigateMode_WhenWorkerReturnsToIdleLoop_ThenItReattachesToTheNearestWaypoint()
     {
         // Arrange
         var route = BuildTestRoute();
@@ -174,21 +177,24 @@ public class VehicleWorkerNavigationTests
         var worker = new VehicleWorker(route, api.Object, new StraightLineNavigator(), NullLogger());
         var row = NavigateRow(42.0, -93.0);
 
-        // Act — several Navigate ticks, then a single IdleLoop tick
+        // Act — several Navigate ticks, then a single Available IdleLoop tick
         for (int i = 0; i < 3; i++)
             await worker.DriveAsync(row, VehicleDriveMode.Navigate, CancellationToken.None);
         await worker.DriveAsync(NavigateRow(0, 0) with { RepState = RepState.Available }, VehicleDriveMode.IdleLoop, CancellationToken.None);
 
-        // Assert — the IdleLoop post is waypoint[1], proving Navigate left the index at 0
+        // Assert — the IdleLoop post is the nearest waypoint (waypoint[0]) to the short
+        // northward excursion, the SIM-007 reattach behaviour
         var loopPost = posted[^1];
-        Assert.Equal(route.Waypoints[1].Latitude, loopPost.Latitude);
-        Assert.Equal(route.Waypoints[1].Longitude, loopPost.Longitude);
+        Assert.Equal(route.Waypoints[0].Latitude, loopPost.Latitude);
+        Assert.Equal(route.Waypoints[0].Longitude, loopPost.Longitude);
     }
 
-    // ─── AC-4: loop traversal is suspended while holding ──────────────────────
+    // ─── SIM-007 reattach: same for a Hold excursion. Here the held position ───
+    // (41.5, -93.6) is west of every waypoint, so the Haversine-nearest is waypoint[1]
+    // — which the assertion now verifies as the reattach result (not blind advance).
 
     [Fact]
-    public async Task GivenHoldMode_WhenWorkerDrives_ThenLoopWaypointIndexDoesNotAdvance()
+    public async Task GivenHoldMode_WhenWorkerReturnsToIdleLoop_ThenItReattachesToTheNearestWaypoint()
     {
         // Arrange
         var route = BuildTestRoute();
@@ -196,12 +202,13 @@ public class VehicleWorkerNavigationTests
         var worker = new VehicleWorker(route, api.Object, new StraightLineNavigator(), NullLogger());
         var row = HoldRow(41.5, -93.6);
 
-        // Act — several Hold ticks, then a single IdleLoop tick
+        // Act — several Hold ticks, then a single Available IdleLoop tick
         for (int i = 0; i < 3; i++)
             await worker.DriveAsync(row, VehicleDriveMode.Hold, CancellationToken.None);
         await worker.DriveAsync(row with { RepState = RepState.Available }, VehicleDriveMode.IdleLoop, CancellationToken.None);
 
-        // Assert — the IdleLoop post is waypoint[1], proving Hold left the index at 0
+        // Assert — the IdleLoop post is the Haversine-nearest waypoint (waypoint[1]) to
+        // the held position, the SIM-007 reattach behaviour
         var loopPost = posted[^1];
         Assert.Equal(route.Waypoints[1].Latitude, loopPost.Latitude);
         Assert.Equal(route.Waypoints[1].Longitude, loopPost.Longitude);

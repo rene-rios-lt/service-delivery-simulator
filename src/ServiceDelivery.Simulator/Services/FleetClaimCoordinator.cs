@@ -7,15 +7,18 @@ public sealed class FleetClaimCoordinator : IFleetClaimCoordinator
 {
     private readonly IIdentitySessionStore _sessionStore;
     private readonly IBackendApiClient _apiClient;
+    private readonly IYieldedRepRegistry _yieldedReps;
     private readonly ILogger<FleetClaimCoordinator> _logger;
 
     public FleetClaimCoordinator(
         IIdentitySessionStore sessionStore,
         IBackendApiClient apiClient,
+        IYieldedRepRegistry yieldedReps,
         ILogger<FleetClaimCoordinator> logger)
     {
         _sessionStore = sessionStore;
         _apiClient = apiClient;
+        _yieldedReps = yieldedReps;
         _logger = logger;
     }
 
@@ -34,6 +37,11 @@ public sealed class FleetClaimCoordinator : IFleetClaimCoordinator
 
         foreach (var rep in _sessionStore.Reps)
         {
+            // SIM-009 AC-4: a rep yielded to a human earlier in the run is never
+            // re-assumed, so it is never given a claim again for the rest of the run.
+            if (_yieldedReps.IsRepYielded(rep.RepId))
+                continue;
+
             if (rep.RepId is not null && repsHoldingVehicles.Contains(rep.RepId))
                 continue;
 
@@ -44,7 +52,10 @@ public sealed class FleetClaimCoordinator : IFleetClaimCoordinator
     private async Task ClaimOneFreeVehicleAsync(RepIdentity rep, CancellationToken cancellationToken)
     {
         var available = await _apiClient.GetAvailableVehicleIdsAsync(rep, cancellationToken);
-        var vehicleId = available.FirstOrDefault();
+
+        // SIM-009 AC-4: a vehicle yielded with a human-controlled rep ("gone home for
+        // the night") is never re-claimed by anyone for the rest of the run.
+        var vehicleId = available.FirstOrDefault(id => !_yieldedReps.IsVehicleYielded(id));
         if (vehicleId is null)
         {
             _logger.LogWarning("No free vehicle available to claim for rep {RepId}.", rep.RepId);

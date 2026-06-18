@@ -49,7 +49,7 @@ public class ArrivalReporterTests
     private static ArrivalReporter BuildReporter(
         Mock<IBackendApiClient> api, Mock<IVehiclePositionProvider> provider, Mock<IIdentitySessionStore> store) =>
         new(api.Object, new StraightLineNavigator(), provider.Object,
-            new RepOperationGate(), store.Object, NullLogger<ArrivalReporter>.Instance);
+            new RepOperationGate(new YieldedRepRegistry()), store.Object, NullLogger<ArrivalReporter>.Instance);
 
     // ─── AC-2: reached + automated → arrive exactly once ──────────────────────
 

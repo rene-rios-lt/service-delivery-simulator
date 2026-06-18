@@ -33,6 +33,11 @@ var host = Host.CreateDefaultBuilder(args)
         // orchestrator (topology A); the resolver/gate are pure decisions; the claim
         // coordinator owns startup + rebalance; the auto-decision policy is a SIM-005
         // seam wired here as a logging placeholder.
+        // SIM-009 sticky-yield memory. SINGLETON: the FleetReconciler tick thread records
+        // takeovers while the gate (reconciler thread) and JobOfferDecisionEngine (SignalR
+        // handler thread) read it — one shared, thread-safe, process-lifetime instance.
+        services.AddSingleton<IYieldedRepRegistry, YieldedRepRegistry>();
+
         services.AddSingleton<IVehicleDriveResolver, VehicleDriveResolver>();
         services.AddSingleton<IRepOperationGate, RepOperationGate>();
         services.AddSingleton<IStraightLineNavigator, StraightLineNavigator>();

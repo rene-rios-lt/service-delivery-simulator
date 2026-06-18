@@ -52,6 +52,18 @@ public sealed class BackendApiClient : IBackendApiClient
                 retryResponse.StatusCode);
     }
 
+    public async Task ArriveAsync(RepIdentity rep, CancellationToken cancellationToken)
+    {
+        var token = await _sessionStore.GetValidTokenAsync(rep, cancellationToken);
+        using var request = BuildAuthorizedRequest(HttpMethod.Post, "/rep/arrive", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+            _logger.LogError(
+                "POST /rep/arrive returned {StatusCode} for rep {RepId}.",
+                response.StatusCode, rep.RepId);
+    }
+
     public Task AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken) =>
         PostJobOfferActionAsync(offerId, "accept", rep, cancellationToken);
 

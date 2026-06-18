@@ -8,24 +8,52 @@ namespace ServiceDelivery.Simulator.Workers;
 // drive object (no longer a BackgroundService): the FleetReconciler owns the tick and
 // calls DriveAsync once per tick with the vehicle's fleet-state row and resolved drive
 // mode. The IdleLoop branch advances the vehicle along its Iowa loop and posts the
-// position (the SIM-004 behaviour). Navigate/Hold geometry is owned by SIM-006 — this
-// story dispatches the mode and leaves those branches as seams.
+// position (the SIM-004 behaviour). Navigate/Hold geometry is owned by SIM-006.
+//
+// SIM-006: the worker drives EVERY truck — including human-controlled ones — and only
+// ever posts position. It NEVER makes a rep action call; the arrive call lives in the
+// gated auto-decision path (ArrivalReporter). The worker caches NO destination: each
+// Navigate tick reads the target fresh from row.ActiveRequestLocation, so redirects
+// re-navigate automatically.
 public sealed class VehicleWorker
 {
     private readonly VehicleRoute _route;
     private readonly IBackendApiClient _apiClient;
+    private readonly IStraightLineNavigator _navigator;
     private readonly ILogger<VehicleWorker> _logger;
 
     private int _waypointIndex;
 
-    public VehicleWorker(VehicleRoute route, IBackendApiClient apiClient, ILogger<VehicleWorker> logger)
+    // The last position this worker posted. Navigate steps from here; null until the
+    // first post, in which case the current loop waypoint is the starting point.
+    private double? _lastLat;
+    private double? _lastLng;
+
+    public VehicleWorker(
+        VehicleRoute route,
+        IBackendApiClient apiClient,
+        IStraightLineNavigator navigator,
+        ILogger<VehicleWorker> logger)
     {
         _route = route;
         _apiClient = apiClient;
+        _navigator = navigator;
         _logger = logger;
     }
 
     public string VehicleId => _route.VehicleId;
+
+    public bool TryGetCurrentPosition(out (double Lat, double Lng) position)
+    {
+        if (_lastLat is { } lat && _lastLng is { } lng)
+        {
+            position = (lat, lng);
+            return true;
+        }
+
+        position = default;
+        return false;
+    }
 
     public async Task DriveAsync(FleetStateRow row, VehicleDriveMode mode, CancellationToken cancellationToken)
     {
@@ -35,10 +63,14 @@ public sealed class VehicleWorker
                 await PostLoopPositionAsync(cancellationToken);
                 break;
 
-            // Navigate/Hold geometry is owned by SIM-006. This story dispatches the
-            // mode from fleet-state and leaves these branches for that story.
             case VehicleDriveMode.Navigate:
+                await PostNavigateStepAsync(row, cancellationToken);
+                break;
+
             case VehicleDriveMode.Hold:
+                await PostHoldPositionAsync(row, cancellationToken);
+                break;
+
             default:
                 break;
         }
@@ -48,11 +80,45 @@ public sealed class VehicleWorker
     {
         _waypointIndex = (_waypointIndex + 1) % _route.Waypoints.Count;
         var waypoint = _route.Waypoints[_waypointIndex];
-        var position = new VehiclePosition(_route.VehicleId, waypoint.Latitude, waypoint.Longitude);
+        await PostPositionAsync(waypoint.Latitude, waypoint.Longitude, cancellationToken);
+    }
+
+    private async Task PostNavigateStepAsync(FleetStateRow row, CancellationToken cancellationToken)
+    {
+        if (row.ActiveRequestLocation is null)
+            return;
+
+        var (currentLat, currentLng) = CurrentPosition();
+        var step = _navigator.Step(
+            currentLat, currentLng,
+            row.ActiveRequestLocation.Lat, row.ActiveRequestLocation.Lng);
+
+        await PostPositionAsync(step.Lat, step.Lng, cancellationToken);
+    }
+
+    private async Task PostHoldPositionAsync(FleetStateRow row, CancellationToken cancellationToken)
+    {
+        var (holdLat, holdLng) = row.ActiveRequestLocation is { } target
+            ? (target.Lat, target.Lng)
+            : CurrentPosition();
+
+        await PostPositionAsync(holdLat, holdLng, cancellationToken);
+    }
+
+    private (double Lat, double Lng) CurrentPosition() =>
+        _lastLat is { } lat && _lastLng is { } lng
+            ? (lat, lng)
+            : (_route.Waypoints[_waypointIndex].Latitude, _route.Waypoints[_waypointIndex].Longitude);
+
+    private async Task PostPositionAsync(double lat, double lng, CancellationToken cancellationToken)
+    {
+        var position = new VehiclePosition(_route.VehicleId, lat, lng);
 
         try
         {
             await _apiClient.PostPositionAsync(position, cancellationToken);
+            _lastLat = lat;
+            _lastLng = lng;
         }
         catch (Exception ex)
         {

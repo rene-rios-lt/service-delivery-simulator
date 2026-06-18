@@ -47,6 +47,7 @@ public class VehicleWorkerRegistrationTests
 
                 services.AddSingleton<IVehicleDriveResolver, VehicleDriveResolver>();
                 services.AddSingleton<IRepOperationGate, RepOperationGate>();
+                services.AddSingleton<IStraightLineNavigator, StraightLineNavigator>();
                 services.AddSingleton<IAutoDecisionEngine, LoggingAutoDecisionEngine>();
                 services.AddSingleton<IFleetClaimCoordinator, FleetClaimCoordinator>();
 
@@ -63,10 +64,14 @@ public class VehicleWorkerRegistrationTests
                         new VehicleWorker(
                             capturedRoute,
                             sp.GetRequiredService<IBackendApiClient>(),
+                            sp.GetRequiredService<IStraightLineNavigator>(),
                             sp.GetRequiredService<ILogger<VehicleWorker>>()));
                 }
 
-                services.AddSingleton<IVehiclePositionDriver, FleetPositionDriver>();
+                services.AddSingleton<FleetPositionDriver>();
+                services.AddSingleton<IVehiclePositionDriver>(sp => sp.GetRequiredService<FleetPositionDriver>());
+                services.AddSingleton<IVehiclePositionProvider>(sp => sp.GetRequiredService<FleetPositionDriver>());
+                services.AddSingleton<IArrivalReporter, ArrivalReporter>();
 
                 services.AddHostedService<FleetReconciler>();
             })

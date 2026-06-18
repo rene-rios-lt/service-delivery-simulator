@@ -237,6 +237,27 @@ public class BackendApiClientAuthTests
         Assert.Equal("/job-offers/offer-42/decline", request.RequestUri!.AbsolutePath);
     }
 
+    // ─── AC-2: arrive posts to /rep/arrive with the rep's bearer token ────────
+
+    [Fact]
+    public async Task GivenARepIdentity_WhenArriveAsyncCalled_ThenPostsToRepArriveWithBearerToken()
+    {
+        // Arrange
+        var rep = RepIdentity(repId: "rep-2", token: "rep2-token", email: "rep2@dealer.com");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.ArriveAsync(rep, CancellationToken.None);
+
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("/rep/arrive", request.RequestUri!.AbsolutePath);
+        Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Assert.Equal("rep2-token", request.Headers.Authorization?.Parameter);
+    }
+
     [Fact]
     public async Task GivenAnOfferAndRep_WhenDeclineJobOfferAsyncCalled_ThenAuthorizationHeaderIsThatRepsToken()
     {

@@ -35,6 +35,7 @@ var host = Host.CreateDefaultBuilder(args)
         // seam wired here as a logging placeholder.
         services.AddSingleton<IVehicleDriveResolver, VehicleDriveResolver>();
         services.AddSingleton<IRepOperationGate, RepOperationGate>();
+        services.AddSingleton<IStraightLineNavigator, StraightLineNavigator>();
         services.AddSingleton<IAutoDecisionEngine, LoggingAutoDecisionEngine>();
         services.AddSingleton<IFleetClaimCoordinator, FleetClaimCoordinator>();
 
@@ -55,10 +56,21 @@ var host = Host.CreateDefaultBuilder(args)
                 new VehicleWorker(
                     capturedRoute,
                     sp.GetRequiredService<IBackendApiClient>(),
+                    sp.GetRequiredService<IStraightLineNavigator>(),
                     sp.GetRequiredService<ILogger<VehicleWorker>>()));
         }
 
-        services.AddSingleton<IVehiclePositionDriver, FleetPositionDriver>();
+        // The FleetPositionDriver is both the per-tick position driver and the
+        // read-only position provider the ArrivalReporter consults. Registered once and
+        // exposed under both interfaces so both consumers share the same instance (and
+        // therefore the same per-vehicle last-posted position).
+        services.AddSingleton<FleetPositionDriver>();
+        services.AddSingleton<IVehiclePositionDriver>(sp => sp.GetRequiredService<FleetPositionDriver>());
+        services.AddSingleton<IVehiclePositionProvider>(sp => sp.GetRequiredService<FleetPositionDriver>());
+
+        // SIM-006: the automated-only arrive handoff, invoked by the FleetReconciler in
+        // the same RepOperationGate-gated block as the auto-decision engine.
+        services.AddSingleton<IArrivalReporter, ArrivalReporter>();
 
         // SimulatorStartupService must be registered first — it authenticates, connects
         // SignalR, and performs the startup claim before the FleetReconciler ticks.

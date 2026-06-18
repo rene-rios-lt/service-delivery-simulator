@@ -29,20 +29,34 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IHubConnectionFactory, DefaultHubConnectionFactory>();
         services.AddSingleton<ISignalRClient, SignalRClient>();
 
-        // SimulatorStartupService must be registered first — it authenticates and
-        // connects SignalR before any VehicleWorker begins. Hosted services start
-        // in registration order.
-        services.AddHostedService<SimulatorStartupService>();
+        // SIM-008 reconciliation collaborators. The reconciler is the single per-tick
+        // orchestrator (topology A); the resolver/gate are pure decisions; the claim
+        // coordinator owns startup + rebalance; the auto-decision policy is a SIM-005
+        // seam wired here as a logging placeholder.
+        services.AddSingleton<IVehicleDriveResolver, VehicleDriveResolver>();
+        services.AddSingleton<IRepOperationGate, RepOperationGate>();
+        services.AddSingleton<IAutoDecisionEngine, LoggingAutoDecisionEngine>();
+        services.AddSingleton<IFleetClaimCoordinator, FleetClaimCoordinator>();
 
+        // One VehicleWorker drive object per vehicle, fronted by the fleet-wide
+        // position driver the reconciler depends on.
         foreach (var route in IowaRoutes.All)
         {
             var capturedRoute = route;
-            services.AddSingleton<IHostedService>(sp =>
+            services.AddSingleton(sp =>
                 new VehicleWorker(
                     capturedRoute,
                     sp.GetRequiredService<IBackendApiClient>(),
                     sp.GetRequiredService<ILogger<VehicleWorker>>()));
         }
+
+        services.AddSingleton<IVehiclePositionDriver, FleetPositionDriver>();
+
+        // SimulatorStartupService must be registered first — it authenticates, connects
+        // SignalR, and performs the startup claim before the FleetReconciler ticks.
+        // Hosted services start in registration order.
+        services.AddHostedService<SimulatorStartupService>();
+        services.AddHostedService<FleetReconciler>();
     })
     .Build();
 

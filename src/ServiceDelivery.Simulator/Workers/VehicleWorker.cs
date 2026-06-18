@@ -1,14 +1,16 @@
+using Microsoft.Extensions.Logging;
 using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 
 namespace ServiceDelivery.Simulator.Workers;
 
-// One instance per vehicle. On each 3-second tick:
-// - Advances vehicle position along its pre-determined Iowa route waypoints
-// - Posts the updated position to the backend API
-// - Checks for an active job offer and auto-accepts or declines
-// - If assigned a job, deviates from the loop route toward the requester location
-public sealed class VehicleWorker : BackgroundService
+// One instance per vehicle. Under SIM-008 topology A this is a plain per-vehicle
+// drive object (no longer a BackgroundService): the FleetReconciler owns the tick and
+// calls DriveAsync once per tick with the vehicle's fleet-state row and resolved drive
+// mode. The IdleLoop branch advances the vehicle along its Iowa loop and posts the
+// position (the SIM-004 behaviour). Navigate/Hold geometry is owned by SIM-006 — this
+// story dispatches the mode and leaves those branches as seams.
+public sealed class VehicleWorker
 {
     private readonly VehicleRoute _route;
     private readonly IBackendApiClient _apiClient;
@@ -23,7 +25,26 @@ public sealed class VehicleWorker : BackgroundService
         _logger = logger;
     }
 
-    public async Task TickAsync(CancellationToken cancellationToken)
+    public string VehicleId => _route.VehicleId;
+
+    public async Task DriveAsync(FleetStateRow row, VehicleDriveMode mode, CancellationToken cancellationToken)
+    {
+        switch (mode)
+        {
+            case VehicleDriveMode.IdleLoop:
+                await PostLoopPositionAsync(cancellationToken);
+                break;
+
+            // Navigate/Hold geometry is owned by SIM-006. This story dispatches the
+            // mode from fleet-state and leaves these branches for that story.
+            case VehicleDriveMode.Navigate:
+            case VehicleDriveMode.Hold:
+            default:
+                break;
+        }
+    }
+
+    private async Task PostLoopPositionAsync(CancellationToken cancellationToken)
     {
         _waypointIndex = (_waypointIndex + 1) % _route.Waypoints.Count;
         var waypoint = _route.Waypoints[_waypointIndex];
@@ -36,21 +57,6 @@ public sealed class VehicleWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to post position for vehicle {VehicleId}. Will retry on next tick.", _route.VehicleId);
-        }
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        _logger.LogInformation("VehicleWorker {VehicleId} starting", _route.VehicleId);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            await TickAsync(stoppingToken);
-
-            // TODO: Check for pending job offer and accept/decline
-            // TODO: If active job, navigate toward requester location instead of looping
-
-            await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
         }
     }
 }

@@ -43,7 +43,7 @@ public class VehicleWorkerRouteTests
             .Callback<VehiclePosition, CancellationToken>((pos, _) => capturedPosition = pos)
             .Returns(Task.CompletedTask);
 
-        var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
+        var worker = new VehicleWorker(route, apiClientMock.Object, new StraightLineNavigator(), NullLogger());
 
         // Act
         await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
@@ -72,7 +72,7 @@ public class VehicleWorkerRouteTests
             .Callback<VehiclePosition, CancellationToken>((pos, _) => capturedPosition = pos)
             .Returns(Task.CompletedTask);
 
-        var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
+        var worker = new VehicleWorker(route, apiClientMock.Object, new StraightLineNavigator(), NullLogger());
 
         // Advance to the desired start index
         for (int i = 0; i < startIndex; i++)
@@ -105,7 +105,7 @@ public class VehicleWorkerRouteTests
             .Callback<VehiclePosition, CancellationToken>((pos, _) => capturedPosition = pos)
             .Returns(Task.CompletedTask);
 
-        var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
+        var worker = new VehicleWorker(route, apiClientMock.Object, new StraightLineNavigator(), NullLogger());
 
         // Advance to the last waypoint (index 2 of 3)
         await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None); // 0 → 1
@@ -141,7 +141,7 @@ public class VehicleWorkerRouteTests
             })
             .Returns(Task.CompletedTask);
 
-        var worker = new VehicleWorker(route, apiClientMock.Object, NullLogger());
+        var worker = new VehicleWorker(route, apiClientMock.Object, new StraightLineNavigator(), NullLogger());
 
         // Act
         await worker.DriveAsync(IdleRow(), VehicleDriveMode.IdleLoop, CancellationToken.None);
@@ -168,7 +168,7 @@ public class VehicleWorkerRouteTests
             .Setup(c => c.PostPositionAsync(It.IsAny<VehiclePosition>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new HttpRequestException("Simulated network error"));
 
-        var worker = new VehicleWorker(route, apiClientMock.Object, loggerMock.Object);
+        var worker = new VehicleWorker(route, apiClientMock.Object, new StraightLineNavigator(), loggerMock.Object);
 
         // Act — DriveAsync should not throw despite PostPositionAsync throwing
         var exception = await Record.ExceptionAsync(

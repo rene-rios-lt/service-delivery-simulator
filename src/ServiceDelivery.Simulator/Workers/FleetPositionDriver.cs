@@ -8,7 +8,7 @@ namespace ServiceDelivery.Simulator.Workers;
 // per-tick drive call to the worker for that vehicle id. This keeps the per-vehicle
 // loop state (waypoint index) on the worker while giving the FleetReconciler a single
 // IVehiclePositionDriver to depend on.
-public sealed class FleetPositionDriver : IVehiclePositionDriver
+public sealed class FleetPositionDriver : IVehiclePositionDriver, IVehiclePositionProvider
 {
     private readonly IReadOnlyDictionary<string, VehicleWorker> _workersByVehicleId;
     private readonly ILogger<FleetPositionDriver> _logger;
@@ -26,5 +26,14 @@ public sealed class FleetPositionDriver : IVehiclePositionDriver
 
         _logger.LogWarning("No VehicleWorker registered for vehicle {VehicleId}; skipping drive.", row.VehicleId);
         return Task.CompletedTask;
+    }
+
+    public bool TryGetPosition(string vehicleId, out (double Lat, double Lng) position)
+    {
+        if (_workersByVehicleId.TryGetValue(vehicleId, out var worker))
+            return worker.TryGetCurrentPosition(out position);
+
+        position = default;
+        return false;
     }
 }

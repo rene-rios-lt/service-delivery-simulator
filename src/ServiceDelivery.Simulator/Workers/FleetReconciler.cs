@@ -20,6 +20,7 @@ public sealed class FleetReconciler : BackgroundService
     private readonly IVehiclePositionDriver _positionDriver;
     private readonly IAutoDecisionEngine _autoDecisionEngine;
     private readonly IFleetStateView _fleetStateView;
+    private readonly IArrivalReporter _arrivalReporter;
     private readonly TimeSpan _tickInterval;
     private readonly ILogger<FleetReconciler> _logger;
 
@@ -31,6 +32,7 @@ public sealed class FleetReconciler : BackgroundService
         IVehiclePositionDriver positionDriver,
         IAutoDecisionEngine autoDecisionEngine,
         IFleetStateView fleetStateView,
+        IArrivalReporter arrivalReporter,
         IOptions<SimulatorOptions> options,
         ILogger<FleetReconciler> logger)
     {
@@ -41,6 +43,7 @@ public sealed class FleetReconciler : BackgroundService
         _positionDriver = positionDriver;
         _autoDecisionEngine = autoDecisionEngine;
         _fleetStateView = fleetStateView;
+        _arrivalReporter = arrivalReporter;
         _tickInterval = TimeSpan.FromSeconds(options.Value.PositionUpdateIntervalSeconds);
         _logger = logger;
     }
@@ -61,7 +64,13 @@ public sealed class FleetReconciler : BackgroundService
             await _positionDriver.DriveAsync(row, mode, cancellationToken);
 
             if (_operationGate.ShouldOperate(row))
+            {
                 await _autoDecisionEngine.RunAsync(row, cancellationToken);
+
+                // SIM-006: arrival reporting is gated automated-only on the same flag,
+                // so it never fires for a human-controlled rep.
+                await _arrivalReporter.ReportArrivalIfReachedAsync(row, cancellationToken);
+            }
         }
     }
 

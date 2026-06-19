@@ -13,10 +13,17 @@ namespace ServiceDelivery.Simulator.Tests.Workers;
 // loop-advance behaviour; Navigate/Hold geometry is owned by SIM-006.
 public class VehicleWorkerRouteTests
 {
+    // BUG-017: the route registration ("V-TEST") is cosmetic patrol-geometry identity; the
+    // backend keys vehicles by GUID, carried on FleetStateRow.VehicleId. These are DISTINCT
+    // on purpose so the posted-identity assertion proves the worker posts the row's GUID,
+    // not the route's registration label.
+    private const string RouteRegistration = "V-TEST";
+    private const string BackendGuid = "30000000-0000-0000-0000-000000000001";
+
     private static VehicleRoute BuildTestRoute(int waypointCount = 6) =>
         new()
         {
-            VehicleId = "V-TEST",
+            VehicleId = RouteRegistration,
             Waypoints = Enumerable.Range(0, waypointCount)
                 .Select(i => new RouteWaypoint(41.0 + i * 0.1, -93.0 + i * 0.1))
                 .ToList()
@@ -25,7 +32,7 @@ public class VehicleWorkerRouteTests
     private static ILogger<VehicleWorker> NullLogger() =>
         new Mock<ILogger<VehicleWorker>>().Object;
 
-    private static FleetStateRow IdleRow(string vehicleId = "V-TEST") =>
+    private static FleetStateRow IdleRow(string vehicleId = BackendGuid) =>
         new(vehicleId, "rep-1", RepState.Available, HumanControlled: false, ActiveRequestLocation: null);
 
     // ─── AC-2: IdleLoop mode advances one waypoint per drive and posts it ─────
@@ -52,7 +59,9 @@ public class VehicleWorkerRouteTests
         Assert.NotNull(capturedPosition);
         Assert.Equal(route.Waypoints[1].Latitude, capturedPosition!.Latitude);
         Assert.Equal(route.Waypoints[1].Longitude, capturedPosition.Longitude);
-        Assert.Equal(route.VehicleId, capturedPosition.VehicleId);
+        // BUG-017: posted identity is the row's backend GUID, not the route registration.
+        Assert.Equal(BackendGuid, capturedPosition.VehicleId);
+        Assert.NotEqual(route.VehicleId, capturedPosition.VehicleId);
     }
 
     [Theory]
@@ -149,7 +158,9 @@ public class VehicleWorkerRouteTests
         // Assert
         Assert.Equal(1, callCount);
         Assert.NotNull(capturedPosition);
-        Assert.Equal(route.VehicleId, capturedPosition!.VehicleId);
+        // BUG-017: posted identity is the row's backend GUID, not the route registration.
+        Assert.Equal(BackendGuid, capturedPosition!.VehicleId);
+        Assert.NotEqual(route.VehicleId, capturedPosition.VehicleId);
         Assert.Equal(route.Waypoints[1].Latitude, capturedPosition.Latitude);
         Assert.Equal(route.Waypoints[1].Longitude, capturedPosition.Longitude);
     }

@@ -14,7 +14,7 @@ A .NET 10 Worker Service that drives the Service Delivery POC with realistic veh
 ```json
 {
   "Simulator": {
-    "BackendBaseUrl": "https://localhost:5001",
+    "BackendBaseUrl": "http://localhost:5180",
     "SimulatorPassword": "<Simulator-role account password — posts vehicle positions>",
     "RepPassword": "<shared password for rep1…rep8 — logs in as each rep to make job decisions>"
   }

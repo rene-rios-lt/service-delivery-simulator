@@ -168,7 +168,7 @@ There is **no "number of reps" knob** — the simulator operates the 8 seeded re
 ```json
 {
   "Simulator": {
-    "BackendBaseUrl": "https://localhost:5001",
+    "BackendBaseUrl": "http://localhost:5180",
     "PositionUpdateIntervalSeconds": 3,
     "AutoDeclineRatePercent": 15,
     "SimulatorEmail": "<set in appsettings.Local.json>",

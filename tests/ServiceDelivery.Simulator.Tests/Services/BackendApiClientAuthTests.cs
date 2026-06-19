@@ -258,6 +258,55 @@ public class BackendApiClientAuthTests
         Assert.Equal("rep2-token", request.Headers.Authorization?.Parameter);
     }
 
+    // ─── SIM-010: complete posts to /rep/complete with the rep's bearer token ─
+
+    [Fact]
+    public async Task GivenARepIdentity_WhenCompleteAsyncCalled_ThenPostsToRepCompleteWithBearerToken()
+    {
+        // Arrange
+        var rep = RepIdentity(repId: "rep-4", token: "rep4-token", email: "rep4@dealer.com");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _, requests) = BuildClient(store.Object, _ => Ok());
+
+        // Act
+        await client.CompleteAsync(rep, CancellationToken.None);
+
+        // Assert
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("/rep/complete", request.RequestUri!.AbsolutePath);
+        Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Assert.Equal("rep4-token", request.Headers.Authorization?.Parameter);
+    }
+
+    [Fact]
+    public async Task GivenCompleteReturnsError_WhenCompleteAsyncCalled_ThenLogsErrorAndDoesNotThrow()
+    {
+        // Arrange
+        var rep = RepIdentity(repId: "rep-4", token: "rep4-token", email: "rep4@dealer.com");
+        var store = StoreWith(SimulatorIdentity());
+        var loggerMock = new Mock<ILogger<BackendApiClient>>();
+        var (client, _, _) = BuildClient(
+            store.Object,
+            _ => new HttpResponseMessage(HttpStatusCode.InternalServerError),
+            loggerMock.Object);
+
+        // Act
+        var exception = await Record.ExceptionAsync(
+            () => client.CompleteAsync(rep, CancellationToken.None));
+
+        // Assert
+        Assert.Null(exception);
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("/rep/complete")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once);
+    }
+
     [Fact]
     public async Task GivenAnOfferAndRep_WhenDeclineJobOfferAsyncCalled_ThenAuthorizationHeaderIsThatRepsToken()
     {

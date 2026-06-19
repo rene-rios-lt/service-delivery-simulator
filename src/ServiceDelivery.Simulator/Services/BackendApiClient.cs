@@ -104,9 +104,12 @@ public sealed class BackendApiClient : IBackendApiClient
     public Task<IReadOnlyList<FleetStateRow>> GetFleetStateAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<FleetStateRow>(_sessionStore.Simulator, "/simulator/fleet-state", cancellationToken);
 
-    public Task<IReadOnlyList<string>> GetAvailableVehicleIdsAsync(
-        RepIdentity rep, CancellationToken cancellationToken) =>
-        GetJsonAsync<string>(rep, "/vehicles/available", cancellationToken);
+    public async Task<IReadOnlyList<string>> GetAvailableVehicleIdsAsync(
+        RepIdentity rep, CancellationToken cancellationToken)
+    {
+        var vehicles = await GetJsonAsync<AvailableVehicle>(rep, "/vehicles/available", cancellationToken);
+        return vehicles.Select(v => v.VehicleId).ToList();
+    }
 
     public async Task ClaimVehicleAsync(string vehicleId, RepIdentity rep, CancellationToken cancellationToken)
     {

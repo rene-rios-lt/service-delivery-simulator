@@ -155,12 +155,19 @@ public class BackendApiClientFleetStateTests
     }
 
     [Fact]
-    public async Task GivenAvailableVehicles_WhenGetAvailableVehicleIdsAsyncCalled_ThenRepTokenIsUsedAndIdsReturned()
+    public async Task GivenAvailableVehiclesAsObjects_WhenGetAvailableVehicleIdsAsyncCalled_ThenRepTokenIsUsedAndProjectedIdsReturned()
     {
-        // Arrange
+        // Arrange — backend GET /vehicles/available returns an array of objects
+        // ({ vehicleId, registration, equipment }), not bare id strings.
+        const string json = """
+        [
+          { "vehicleId": "V-003", "registration": "REG-003", "equipment": ["tow"] },
+          { "vehicleId": "V-004", "registration": "REG-004", "equipment": [] }
+        ]
+        """;
         var rep = Rep(token: "rep1-token");
         var store = StoreWith(SimulatorIdentity());
-        var (client, requests) = BuildClient(store.Object, _ => JsonOk("""["V-003","V-004"]"""));
+        var (client, requests) = BuildClient(store.Object, _ => JsonOk(json));
 
         // Act
         var ids = await client.GetAvailableVehicleIdsAsync(rep, CancellationToken.None);

@@ -13,6 +13,11 @@ public interface IBackendApiClient
     // gated auto-decision path so it never fires for a human-controlled rep.
     Task ArriveAsync(RepIdentity rep, CancellationToken cancellationToken);
 
+    // SIM-010: after the randomized on-site dwell elapses, the automated rep marks the
+    // work complete — POST /rep/complete with the rep's bearer token (no body). Mirrors
+    // ArriveAsync; fired only from the gated dwell path so it never fires for a human rep.
+    Task CompleteAsync(RepIdentity rep, CancellationToken cancellationToken);
+
     // SIM-008: the single authoritative fleet-state read (Simulator token) plus the
     // rep-token claim operations used at startup and during rebalance.
     Task<IReadOnlyList<FleetStateRow>> GetFleetStateAsync(CancellationToken cancellationToken);

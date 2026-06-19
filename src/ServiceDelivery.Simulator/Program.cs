@@ -41,7 +41,11 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IVehicleDriveResolver, VehicleDriveResolver>();
         services.AddSingleton<IRepOperationGate, RepOperationGate>();
         services.AddSingleton<IStraightLineNavigator, StraightLineNavigator>();
-        services.AddSingleton<IAutoDecisionEngine, LoggingAutoDecisionEngine>();
+        // SIM-010: the on-site dwell engine replaces the SIM-008 logging placeholder as
+        // the IAutoDecisionEngine. SINGLETON because it holds per-vehicle dwell state
+        // across reconciler ticks (mirroring the other shared per-tick seams).
+        services.AddSingleton<ISystemClock, SystemClock>();
+        services.AddSingleton<IAutoDecisionEngine, OnSiteDwellEngine>();
         services.AddSingleton<IFleetClaimCoordinator, FleetClaimCoordinator>();
 
         // SIM-005 offer-triggered auto-response. IFleetStateView is a SINGLETON shared

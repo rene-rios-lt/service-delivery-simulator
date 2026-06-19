@@ -64,6 +64,18 @@ public sealed class BackendApiClient : IBackendApiClient
                 response.StatusCode, rep.RepId);
     }
 
+    public async Task CompleteAsync(RepIdentity rep, CancellationToken cancellationToken)
+    {
+        var token = await _sessionStore.GetValidTokenAsync(rep, cancellationToken);
+        using var request = BuildAuthorizedRequest(HttpMethod.Post, "/rep/complete", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+            _logger.LogError(
+                "POST /rep/complete returned {StatusCode} for rep {RepId}.",
+                response.StatusCode, rep.RepId);
+    }
+
     public Task AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken) =>
         PostJobOfferActionAsync(offerId, "accept", rep, cancellationToken);
 

@@ -110,7 +110,7 @@ public sealed class VehicleWorker
         }
 
         var waypoint = _route.Waypoints[_waypointIndex];
-        await PostPositionAsync(waypoint.Latitude, waypoint.Longitude, cancellationToken);
+        await PostPositionAsync(row.VehicleId, waypoint.Latitude, waypoint.Longitude, cancellationToken);
     }
 
     private async Task PostNavigateStepAsync(FleetStateRow row, CancellationToken cancellationToken)
@@ -123,7 +123,7 @@ public sealed class VehicleWorker
             currentLat, currentLng,
             row.ActiveRequestLocation.Lat, row.ActiveRequestLocation.Lng);
 
-        await PostPositionAsync(step.Lat, step.Lng, cancellationToken);
+        await PostPositionAsync(row.VehicleId, step.Lat, step.Lng, cancellationToken);
     }
 
     private async Task PostHoldPositionAsync(FleetStateRow row, CancellationToken cancellationToken)
@@ -132,7 +132,7 @@ public sealed class VehicleWorker
             ? (target.Lat, target.Lng)
             : CurrentPosition();
 
-        await PostPositionAsync(holdLat, holdLng, cancellationToken);
+        await PostPositionAsync(row.VehicleId, holdLat, holdLng, cancellationToken);
     }
 
     private (double Lat, double Lng) CurrentPosition() =>
@@ -140,9 +140,14 @@ public sealed class VehicleWorker
             ? (lat, lng)
             : (_route.Waypoints[_waypointIndex].Latitude, _route.Waypoints[_waypointIndex].Longitude);
 
-    private async Task PostPositionAsync(double lat, double lng, CancellationToken cancellationToken)
+    // BUG-017: the posted identity is the backend vehicle GUID (row.VehicleId), NOT the
+    // route's registration label (_route.VehicleId). The route supplies only patrol
+    // geometry; the backend keys vehicles — and the POST URL /vehicles/{id}/position — by
+    // the GUID. Posting the registration sent updates to a non-existent vehicle, so the
+    // backend never registered a position and warm-up never saw the fleet move.
+    private async Task PostPositionAsync(string vehicleGuid, double lat, double lng, CancellationToken cancellationToken)
     {
-        var position = new VehiclePosition(_route.VehicleId, lat, lng);
+        var position = new VehiclePosition(vehicleGuid, lat, lng);
 
         try
         {
@@ -152,7 +157,7 @@ public sealed class VehicleWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to post position for vehicle {VehicleId}. Will retry on next tick.", _route.VehicleId);
+            _logger.LogError(ex, "Failed to post position for vehicle {VehicleId}. Will retry on next tick.", vehicleGuid);
         }
     }
 }

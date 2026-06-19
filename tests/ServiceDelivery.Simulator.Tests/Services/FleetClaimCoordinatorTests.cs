@@ -1,5 +1,7 @@
+using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using Moq.Protected;
 using ServiceDelivery.Simulator.Models;
 using ServiceDelivery.Simulator.Services;
 using Xunit;
@@ -61,6 +63,55 @@ public class FleetClaimCoordinatorTests
         // Assert
         apiClient.Verify(c => c.ClaimVehicleAsync("V-001", rep1, It.IsAny<CancellationToken>()), Times.Once);
         apiClient.Verify(c => c.ClaimVehicleAsync("V-002", rep2, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    // ─── BUG-016 AC-2: object-shaped /vehicles/available no longer crashes claim ───
+    // Wires a REAL BackendApiClient (over a stub HttpMessageHandler) into the
+    // coordinator so the actual deserialization path is exercised end-to-end — a
+    // mocked IBackendApiClient would not have caught the response-shape bug.
+    [Fact]
+    public async Task GivenAvailableVehiclesAsObjects_WhenClaimInitialVehiclesAsyncCalled_ThenItClaimsTheFirstFreeVehicleWithoutThrowing()
+    {
+        // Arrange
+        var rep1 = Rep("rep-1");
+        var store = StoreWith(rep1);
+        store.Setup(s => s.GetValidTokenAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("rep1-token");
+
+        const string availableJson = """
+        [
+          { "vehicleId": "V-003", "registration": "REG-003", "equipment": ["tow"] },
+          { "vehicleId": "V-004", "registration": "REG-004", "equipment": [] }
+        ]
+        """;
+        var claimRequests = new List<HttpRequestMessage>();
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
+            {
+                if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath == "/vehicles/available")
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(availableJson) };
+
+                claimRequests.Add(req);
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            });
+
+        var httpClient = new HttpClient(handlerMock.Object) { BaseAddress = new Uri("https://backend.local") };
+        var apiClient = new BackendApiClient(httpClient, store.Object, NullLogger<BackendApiClient>.Instance);
+        var coordinator = new FleetClaimCoordinator(
+            store.Object, apiClient, new YieldedRepRegistry(), NullLogger<FleetClaimCoordinator>.Instance);
+
+        // Act
+        await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
+
+        // Assert — the first free vehicle is claimed and no exception propagated
+        var claim = Assert.Single(claimRequests);
+        Assert.Equal("/vehicles/V-003/claim", claim.RequestUri!.AbsolutePath);
     }
 
     [Fact]

@@ -59,8 +59,9 @@ During story execution the agent writes ephemeral working files to `.stories/<ST
 # Build
 dotnet build ServiceDelivery.Simulator.slnx
 
-# Run the simulator (requires backend running and appsettings.Local.json configured)
-dotnet run --project src/ServiceDelivery.Simulator
+# Run the simulator (requires backend running and appsettings.Local.json configured).
+# DOTNET_ENVIRONMENT=Local makes Host.CreateDefaultBuilder layer appsettings.Local.json on top.
+DOTNET_ENVIRONMENT=Local dotnet run --project src/ServiceDelivery.Simulator
 
 # Run tests
 dotnet test ServiceDelivery.Simulator.slnx
@@ -68,17 +69,19 @@ dotnet test ServiceDelivery.Simulator.slnx
 
 ## Local Configuration
 
-Create `src/ServiceDelivery.Simulator/appsettings.Local.json` (gitignored) with your local settings:
+Credentials live only in the gitignored `appsettings.Local.json` — the committed `appsettings.json` carries no secrets (empty password fields). Copy `appsettings.Local.json.example` to `appsettings.Local.json` and fill it in:
 
 ```json
 {
   "Simulator": {
-    "BackendBaseUrl": "https://localhost:5001",
+    "BackendBaseUrl": "http://localhost:5180",
     "SimulatorPassword": "<Simulator-role account password from backend seed data — used only to post vehicle positions>",
     "RepPassword": "<shared password for the seeded rep1…rep8 accounts — used to log in as each rep and make job decisions>"
   }
 }
 ```
+
+`appsettings.Local.json` is loaded only when `DOTNET_ENVIRONMENT=Local` (the `Host.CreateDefaultBuilder` convention — it layers `appsettings.{DOTNET_ENVIRONMENT}.json`). `scripts/local/start.sh` sets this for you. The same pattern is the template for future `appsettings.Development.json` / `appsettings.Test.json` / `appsettings.Production.json`. The backend's local HTTP profile is `http://localhost:5180` (HTTPS is `https://localhost:7256`).
 
 ## Key Behaviors
 

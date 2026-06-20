@@ -14,10 +14,17 @@ namespace ServiceDelivery.Simulator.Tests.Workers;
 // call — the worker drives every truck, including human-controlled ones.
 public class VehicleWorkerNavigationTests
 {
+    // BUG-017 / QUAL-001: the route registration ("V-TEST") is cosmetic patrol-geometry
+    // identity; the backend keys vehicles by GUID, carried on FleetStateRow.VehicleId and
+    // posted to /vehicles/{id}/position. These are DISTINCT on purpose so the posted-identity
+    // assertion proves the worker posts the row's GUID, not the route's registration label.
+    private const string RouteRegistration = "V-TEST";
+    private const string BackendGuid = "30000000-0000-0000-0000-000000000002";
+
     private static VehicleRoute BuildTestRoute(int waypointCount = 6) =>
         new()
         {
-            VehicleId = "V-TEST",
+            VehicleId = RouteRegistration,
             Waypoints = Enumerable.Range(0, waypointCount)
                 .Select(i => new RouteWaypoint(41.0 + i * 0.1, -93.0 + i * 0.1))
                 .ToList()
@@ -27,10 +34,10 @@ public class VehicleWorkerNavigationTests
         new Mock<ILogger<VehicleWorker>>().Object;
 
     private static FleetStateRow NavigateRow(double lat, double lng, bool humanControlled = false) =>
-        new("V-TEST", "rep-1", RepState.EnRoute, humanControlled, new RequesterLocation(lat, lng));
+        new(BackendGuid, "rep-1", RepState.EnRoute, humanControlled, new RequesterLocation(lat, lng));
 
     private static FleetStateRow HoldRow(double lat, double lng, bool humanControlled = false) =>
-        new("V-TEST", "rep-1", RepState.OnSite, humanControlled, new RequesterLocation(lat, lng));
+        new(BackendGuid, "rep-1", RepState.OnSite, humanControlled, new RequesterLocation(lat, lng));
 
     private static (Mock<IBackendApiClient> api, List<VehiclePosition> posted) ApiCapturingPositions()
     {
@@ -64,7 +71,9 @@ public class VehicleWorkerNavigationTests
         double startDistance = Haversine(startWaypoint.Latitude, startWaypoint.Longitude, targetLat, targetLng);
         double postedDistance = Haversine(post.Latitude, post.Longitude, targetLat, targetLng);
         Assert.True(postedDistance < startDistance, "posted position should be closer to the requester");
-        Assert.Equal(route.VehicleId, post.VehicleId);
+        // BUG-017 / QUAL-001: posted identity is the row's backend GUID, not the route registration.
+        Assert.Equal(BackendGuid, post.VehicleId);
+        Assert.NotEqual(route.VehicleId, post.VehicleId);
     }
 
     // ─── AC-2 support: the worker exposes its last-posted position ────────────
@@ -228,11 +237,11 @@ public class VehicleWorkerNavigationTests
         var targetB = new RequesterLocation(40.0, -95.0);
 
         // Act — one tick toward A, then a tick toward the redirected target B
-        await worker.DriveAsync(new FleetStateRow("V-TEST", "rep-1", RepState.EnRoute, false, targetA),
+        await worker.DriveAsync(new FleetStateRow(BackendGuid, "rep-1", RepState.EnRoute, false, targetA),
             VehicleDriveMode.Navigate, CancellationToken.None);
         var afterA = posted[^1];
 
-        await worker.DriveAsync(new FleetStateRow("V-TEST", "rep-1", RepState.EnRoute, false, targetB),
+        await worker.DriveAsync(new FleetStateRow(BackendGuid, "rep-1", RepState.EnRoute, false, targetB),
             VehicleDriveMode.Navigate, CancellationToken.None);
         var afterB = posted[^1];
 
@@ -254,11 +263,11 @@ public class VehicleWorkerNavigationTests
         var targetB = new RequesterLocation(40.0, -95.0);
 
         // Act
-        await worker.DriveAsync(new FleetStateRow("V-TEST", "rep-1", RepState.EnRoute, true, targetA),
+        await worker.DriveAsync(new FleetStateRow(BackendGuid, "rep-1", RepState.EnRoute, true, targetA),
             VehicleDriveMode.Navigate, CancellationToken.None);
         var afterA = posted[^1];
 
-        await worker.DriveAsync(new FleetStateRow("V-TEST", "rep-1", RepState.EnRoute, true, targetB),
+        await worker.DriveAsync(new FleetStateRow(BackendGuid, "rep-1", RepState.EnRoute, true, targetB),
             VehicleDriveMode.Navigate, CancellationToken.None);
         var afterB = posted[^1];
 

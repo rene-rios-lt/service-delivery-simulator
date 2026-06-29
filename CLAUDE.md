@@ -94,6 +94,15 @@ See central repo ADR-0009 for the authoritative "Human Takeover" design.
 - **Reconciliation + yield-on-takeover**: Each tick, read current fleet state and operate only reps no human controls. A rep taken over by a human is yielded permanently for the rest of the run (sticky) and never re-assumed; abandoned jobs re-match. The position engine still drives the human's truck — navigating to the requester after the human Accepts, then holding until the human taps Arrived/Complete
 - **Startup sequence**: Authenticate the `Simulator`-role account and the `rep1…rep8` accounts → connect each operated rep's SignalR `RepHub` → start the position engine and per-rep decision loops
 
+## Wire Contract
+
+The simulator deserializes backend responses (`/simulator/fleet-state`, `/vehicles/available`) into typed models. Treat the wire as a contract that must **fail loud** on drift:
+
+- A wire enum that arrives **unmapped, missing, or as an integer must THROW** — never silently bind to a bogus value. `BackendApiClient.FleetStateJsonOptions` uses `new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false)` so only valid enum-name strings bind; an integer or an unrecognised name raises a `JsonException`.
+- Back **each consumed endpoint with a captured-real-payload contract test** — feed a faithful backend response (camelCase wire shape) through the real `GetFleetStateAsync` / `GetAvailableVehicleIdsAsync` deserialization path (mocked `HttpMessageHandler`), asserting typed fields bind and that drift throws. See `tests/ServiceDelivery.Simulator.Tests/Services/BackendApiClientContractTests.cs`.
+
+Rationale: a silently-bound wrong value is the failure mode behind BUG-016 (object-array `/vehicles/available` parsed as `string[]`) and BUG-036 (enum drift). Per central ADR-0011, the contract is verified against the known/live response shape, captured as a fixture.
+
 ## Test-Driven Development
 
 TDD is mandatory in this repo, same as all other repos in the Service Delivery system.

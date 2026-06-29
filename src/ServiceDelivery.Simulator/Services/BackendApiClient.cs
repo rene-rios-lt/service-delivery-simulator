@@ -95,10 +95,14 @@ public sealed class BackendApiClient : IBackendApiClient
                 offerId, action, response.StatusCode, rep.RepId);
     }
 
+    // Wire enums must arrive as the enum NAME string. An integer or an unmapped name
+    // is schema drift and must THROW, never silently bind to a bogus value
+    // (allowIntegerValues: false closes the residual integer path — see QUAL-006 /
+    // ADR-0011 / BUG-016 / BUG-036).
     private static readonly JsonSerializerOptions FleetStateJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter(namingPolicy: null, allowIntegerValues: false) }
     };
 
     public Task<IReadOnlyList<FleetStateRow>> GetFleetStateAsync(CancellationToken cancellationToken) =>

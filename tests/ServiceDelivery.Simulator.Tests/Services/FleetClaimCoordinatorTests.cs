@@ -46,14 +46,14 @@ public class FleetClaimCoordinatorTests
         var store = StoreWith(rep1, rep2);
 
         var apiClient = new Mock<IBackendApiClient>();
-        var available = new Queue<IReadOnlyList<string>>(new IReadOnlyList<string>[]
-        {
-            new[] { "V-001", "V-002" },
-            new[] { "V-002" }
-        });
+        // The take-over listing returns the SAME list to every rep (claimed-but-idle
+        // vehicles are not removed) — the coordinator must still fan reps out.
         apiClient
             .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(() => available.Dequeue());
+            .ReturnsAsync(new[] { "V-001", "V-002" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
 
         var coordinator = Build(store, apiClient);
 
@@ -63,6 +63,38 @@ public class FleetClaimCoordinatorTests
         // Assert
         apiClient.Verify(c => c.ClaimVehicleAsync("V-001", rep1, It.IsAny<CancellationToken>()), Times.Once);
         apiClient.Verify(c => c.ClaimVehicleAsync("V-002", rep2, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    // ─── BUG-052 AC-1: N reps sharing the SAME front-of-list candidate each claim a
+    // distinct vehicle. GET /vehicles/available is the human take-over listing, so it
+    // returns the SAME list (claimed-but-idle vehicles included) to every rep. A naive
+    // FirstOrDefault would hand all reps the same front-of-list vehicle: stampede. ───
+    [Fact]
+    public async Task GivenNRepsWithSameFrontOfListCandidate_WhenClaimInitialVehiclesRuns_ThenEachRepClaimsADistinctVehicle()
+    {
+        // Arrange — 4 reps all see the identical available list
+        var reps = new[] { Rep("rep-1"), Rep("rep-2"), Rep("rep-3"), Rep("rep-4") };
+        var store = StoreWith(reps);
+
+        var claims = new List<(string vehicleId, string repId)>();
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-1", "V-2", "V-3", "V-4" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .Callback<string, RepIdentity, CancellationToken>((v, r, _) => claims.Add((v, r.RepId!)))
+            .ReturnsAsync(ClaimOutcome.Claimed);
+
+        var coordinator = Build(store, apiClient);
+
+        // Act
+        await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
+
+        // Assert — 4 claims, 4 distinct vehicles, one per rep (no stampede)
+        Assert.Equal(4, claims.Count);
+        Assert.Equal(4, claims.Select(c => c.vehicleId).Distinct().Count());
+        Assert.Equal(4, claims.Select(c => c.repId).Distinct().Count());
     }
 
     // ─── BUG-016 AC-2: object-shaped /vehicles/available no longer crashes claim ───
@@ -114,6 +146,36 @@ public class FleetClaimCoordinatorTests
         Assert.Equal("/vehicles/V-003/claim", claim.RequestUri!.AbsolutePath);
     }
 
+    // ─── BUG-052 AC-2: on a 409 the rep advances to the next candidate ─────────────
+    [Fact]
+    public async Task GivenA409OnFirstCandidate_WhenClaimingFreeVehicle_ThenRepAdvancesToNextCandidate()
+    {
+        // Arrange — the rep's first candidate is already taken (409 Conflict); the
+        // second is free.
+        var rep1 = Rep("rep-1");
+        var store = StoreWith(rep1);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-1", "V-2" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-1", rep1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Conflict);
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-2", rep1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
+
+        var coordinator = Build(store, apiClient);
+
+        // Act
+        await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
+
+        // Assert — the rep advances past the conflicted V-1 and claims V-2
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-1", rep1, It.IsAny<CancellationToken>()), Times.Once);
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-2", rep1, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     [Fact]
     public async Task GivenAnOperatedRepWithNoVehicle_WhenRebalanceRuns_ThenAFreeVehicleIsClaimedForThatRep()
     {
@@ -126,6 +188,9 @@ public class FleetClaimCoordinatorTests
         apiClient
             .Setup(c => c.GetAvailableVehicleIdsAsync(rep2, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { "V-007" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
 
         var coordinator = Build(store, apiClient);
 
@@ -141,6 +206,41 @@ public class FleetClaimCoordinatorTests
         // Assert
         apiClient.Verify(c => c.ClaimVehicleAsync("V-007", rep2, It.IsAny<CancellationToken>()), Times.Once);
         apiClient.Verify(c => c.ClaimVehicleAsync(It.IsAny<string>(), rep1, It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ─── BUG-052 AC-4: a vehicle already claimed by an earlier rep in the same pass is
+    // skipped by later reps, so no vehicle is claimed twice — even when an earlier rep
+    // had to advance past a 409 onto a vehicle a later rep's offset also targets. ────
+    [Fact]
+    public async Task GivenAVehicleAlreadyClaimedLocally_WhenClaimingForAnotherRep_ThenAlreadyClaimedVehicleIsSkipped()
+    {
+        // Arrange — 3 reps see the same list; V-2 is externally held (409). Without a
+        // local claimed-set, rep-2 advances onto V-3 and rep-3's offset also lands on
+        // V-3, double-claiming it.
+        var rep1 = Rep("rep-1");
+        var rep2 = Rep("rep-2");
+        var rep3 = Rep("rep-3");
+        var store = StoreWith(rep1, rep2, rep3);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-1", "V-2", "V-3" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-2", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Conflict);
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync(It.Is<string>(id => id != "V-2"), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
+
+        var coordinator = Build(store, apiClient);
+
+        // Act
+        await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
+
+        // Assert — no vehicle is claimed by more than one rep
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-1", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Once);
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-3", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -167,6 +267,72 @@ public class FleetClaimCoordinatorTests
         apiClient.Verify(
             c => c.ClaimVehicleAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()),
             Times.Never);
+    }
+
+    // ─── BUG-052 (binding constraint): a 409 Conflict marks the vehicle locally-claimed
+    // (genuinely taken) so a later rep never re-attempts it, whereas a transient
+    // failure must NOT — see the two tests below. ─────────────────────────────────
+    [Fact]
+    public async Task GivenA409ConflictedVehicle_WhenClaimingForAnotherRep_ThenTheConflictedVehicleIsExcluded()
+    {
+        // Arrange — 2 reps see the same list; V-1 is genuinely taken (409). rep-1 hits
+        // V-1's 409 then claims V-2; rep-2 must NOT re-attempt the conflicted V-1.
+        var rep1 = Rep("rep-1");
+        var rep2 = Rep("rep-2");
+        var store = StoreWith(rep1, rep2);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-1", "V-2" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-1", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Conflict);
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-2", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
+
+        var coordinator = Build(store, apiClient);
+
+        // Act
+        await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
+
+        // Assert — the conflicted V-1 was recorded locally, so rep-2 never re-attempts it
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-1", rep2, It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GivenATransientClaimFailure_WhenClaimingForAnotherRep_ThenTheFailedVehicleRemainsEligible()
+    {
+        // Arrange — 2 reps see the same list. rep-1's first candidate V-1 hits a
+        // TRANSIENT failure (e.g. 500/network blip) — the vehicle is still genuinely
+        // free. rep-1 advances to V-2. V-1 must NOT be marked locally-claimed, so
+        // rep-2 can still claim it (contrast with the 409 case above).
+        var rep1 = Rep("rep-1");
+        var rep2 = Rep("rep-2");
+        var store = StoreWith(rep1, rep2);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient
+            .Setup(c => c.GetAvailableVehicleIdsAsync(It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { "V-1", "V-2" });
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-1", rep1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Failed);
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-2", rep1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
+        apiClient
+            .Setup(c => c.ClaimVehicleAsync("V-1", rep2, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ClaimOutcome.Claimed);
+
+        var coordinator = Build(store, apiClient);
+
+        // Act
+        await coordinator.ClaimInitialVehiclesAsync(CancellationToken.None);
+
+        // Assert — the transiently-failed V-1 stayed eligible and rep-2 claimed it
+        apiClient.Verify(c => c.ClaimVehicleAsync("V-1", rep2, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     // ─── SIM-009 AC-4: yielded reps and vehicles are excluded from rebalancing ───

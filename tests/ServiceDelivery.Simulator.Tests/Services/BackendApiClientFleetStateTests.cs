@@ -145,13 +145,38 @@ public class BackendApiClientFleetStateTests
         var (client, requests) = BuildClient(store.Object, _ => new HttpResponseMessage(HttpStatusCode.OK));
 
         // Act
-        await client.ClaimVehicleAsync("V-005", rep, CancellationToken.None);
+        var outcome = await client.ClaimVehicleAsync("V-005", rep, CancellationToken.None);
 
         // Assert
         var request = Assert.Single(requests);
         Assert.Equal(HttpMethod.Post, request.Method);
         Assert.Equal("/vehicles/V-005/claim", request.RequestUri!.AbsolutePath);
         Assert.Equal("rep1-token", request.Headers.Authorization?.Parameter);
+        Assert.Equal(ClaimOutcome.Claimed, outcome);
+    }
+
+    // ─── BUG-052: claim maps the HTTP status to a ClaimOutcome so the coordinator can
+    // tell a genuine 409 conflict (vehicle held by another rep — exclude it) apart from
+    // a transient failure (5xx/network — leave it eligible for a later attempt) ───────
+    [Theory]
+    [InlineData(HttpStatusCode.OK, ClaimOutcome.Claimed)]
+    [InlineData(HttpStatusCode.NoContent, ClaimOutcome.Claimed)]
+    [InlineData(HttpStatusCode.Conflict, ClaimOutcome.Conflict)]
+    [InlineData(HttpStatusCode.InternalServerError, ClaimOutcome.Failed)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, ClaimOutcome.Failed)]
+    public async Task GivenAClaimResponseStatus_WhenClaimVehicleAsyncCalled_ThenOutcomeReflectsTheStatus(
+        HttpStatusCode status, ClaimOutcome expected)
+    {
+        // Arrange
+        var rep = Rep(token: "rep1-token");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _) = BuildClient(store.Object, _ => new HttpResponseMessage(status));
+
+        // Act
+        var outcome = await client.ClaimVehicleAsync("V-005", rep, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(expected, outcome);
     }
 
     [Fact]

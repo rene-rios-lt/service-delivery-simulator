@@ -21,6 +21,11 @@ public interface IBackendApiClient
     // SIM-008: the single authoritative fleet-state read (Simulator token) plus the
     // rep-token claim operations used at startup and during rebalance.
     Task<IReadOnlyList<FleetStateRow>> GetFleetStateAsync(CancellationToken cancellationToken);
-    Task ClaimVehicleAsync(string vehicleId, RepIdentity rep, CancellationToken cancellationToken);
+
+    // BUG-052: returns a ClaimOutcome so the coordinator can distinguish a genuine 409
+    // conflict (Conflict — exclude the vehicle permanently) from a transient failure
+    // (Failed — leave the vehicle eligible) rather than re-selecting the same
+    // front-of-list vehicle every tick. Claimed = the claim succeeded.
+    Task<ClaimOutcome> ClaimVehicleAsync(string vehicleId, RepIdentity rep, CancellationToken cancellationToken);
     Task<IReadOnlyList<string>> GetAvailableVehicleIdsAsync(RepIdentity rep, CancellationToken cancellationToken);
 }

@@ -115,16 +115,27 @@ public sealed class BackendApiClient : IBackendApiClient
         return vehicles.Select(v => v.VehicleId).ToList();
     }
 
-    public async Task ClaimVehicleAsync(string vehicleId, RepIdentity rep, CancellationToken cancellationToken)
+    public async Task<ClaimOutcome> ClaimVehicleAsync(string vehicleId, RepIdentity rep, CancellationToken cancellationToken)
     {
         var token = await _sessionStore.GetValidTokenAsync(rep, cancellationToken);
         using var request = BuildAuthorizedRequest(HttpMethod.Post, $"/vehicles/{vehicleId}/claim", token);
         using var response = await _httpClient.SendAsync(request, cancellationToken);
 
-        if (!response.IsSuccessStatusCode)
-            _logger.LogError(
-                "POST /vehicles/{VehicleId}/claim returned {StatusCode} for rep {RepId}.",
-                vehicleId, response.StatusCode, rep.RepId);
+        if (response.IsSuccessStatusCode)
+            return ClaimOutcome.Claimed;
+
+        if (response.StatusCode == HttpStatusCode.Conflict)
+        {
+            _logger.LogDebug(
+                "POST /vehicles/{VehicleId}/claim returned 409 Conflict for rep {RepId}; advancing to next candidate.",
+                vehicleId, rep.RepId);
+            return ClaimOutcome.Conflict;
+        }
+
+        _logger.LogError(
+            "POST /vehicles/{VehicleId}/claim returned {StatusCode} for rep {RepId}.",
+            vehicleId, response.StatusCode, rep.RepId);
+        return ClaimOutcome.Failed;
     }
 
     private async Task<IReadOnlyList<T>> GetJsonAsync<T>(

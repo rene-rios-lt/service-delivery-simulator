@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
 using ServiceDelivery.Simulator.Configuration;
@@ -148,13 +149,155 @@ public class SignalRClientTests
         Assert.Contains(("rep-2", "offer-2"), received);
     }
 
+    // ─── AC-1: per-rep connection lifecycle is logged with the rep label ──────
+
+    [Fact]
+    public async Task GivenARepHubConnection_WhenClosedEventFires_ThenClosureIsLoggedWithRepLabel()
+    {
+        // Arrange
+        var loggerMock = new Mock<ILogger<SignalRClient>>();
+        await using var client = new SignalRClient(
+            Options.Create(DefaultOptions()), WorkingFactory().Object, loggerMock.Object);
+
+        // Act
+        client.SimulateClosedForTest("rep-3", new Exception("socket dropped"));
+
+        // Assert
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("rep-3") && v.ToString()!.Contains("closed")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task GivenARepHubConnection_WhenReconnectingEventFires_ThenReconnectingIsLoggedWithRepLabel()
+    {
+        // Arrange
+        var loggerMock = new Mock<ILogger<SignalRClient>>();
+        await using var client = new SignalRClient(
+            Options.Create(DefaultOptions()), WorkingFactory().Object, loggerMock.Object);
+
+        // Act
+        client.SimulateReconnectingForTest("rep-5", new Exception("transient drop"));
+
+        // Assert
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("rep-5") && v.ToString()!.Contains("reconnecting")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task GivenARepHubConnection_WhenReconnectedEventFires_ThenReconnectedIsLoggedWithRepLabel()
+    {
+        // Arrange
+        var loggerMock = new Mock<ILogger<SignalRClient>>();
+        await using var client = new SignalRClient(
+            Options.Create(DefaultOptions()), WorkingFactory().Object, loggerMock.Object);
+
+        // Act
+        client.SimulateReconnectedForTest("rep-7", "conn-abc");
+
+        // Assert
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Information,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("rep-7") && v.ToString()!.Contains("reconnected")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    // ─── AC-2: a deaf connection is restarted within a reconciler tick ────────
+
+    [Fact]
+    public async Task GivenARepHubConnectionNotConnected_WhenEnsureConnectedCalled_ThenStartAsyncIsAttemptedAndErrorIsHandledGracefully()
+    {
+        // Arrange — the connection is built against an unreachable host, so the initial
+        // StartAsync fails and the stored connection is left in a non-Connected state
+        var loggerMock = new Mock<ILogger<SignalRClient>>();
+        var factoryMock = new Mock<IHubConnectionFactory>();
+        factoryMock
+            .Setup(f => f.Build(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(() => new HubConnectionBuilder()
+                .WithUrl("http://unreachable-host-that-does-not-exist.invalid/hubs/rep")
+                .Build());
+
+        await using var client = new SignalRClient(
+            Options.Create(DefaultOptions()), factoryMock.Object, loggerMock.Object);
+        await client.ConnectAllAsync(new[] { Rep("rep-1", "token-1", "rep1@dealer.com") }, CancellationToken.None);
+
+        // Act — the reconciler asks for a health check; the restart attempt must fail gracefully
+        var exception = await Record.ExceptionAsync(
+            () => client.EnsureConnectedAsync("rep-1", CancellationToken.None));
+
+        // Assert — no exception propagated; the deaf connection and its retry are logged
+        Assert.Null(exception);
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("rep-1")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task GivenAClosedRepHub_WhenClosedEventFires_ThenJitteredRestartIsScheduledWithLogging()
+    {
+        // Arrange
+        var loggerMock = new Mock<ILogger<SignalRClient>>();
+        await using var client = new SignalRClient(
+            Options.Create(DefaultOptions()), WorkingFactory().Object, loggerMock.Object);
+
+        // Act — the connection.Closed event fires (reconnect budget exhausted)
+        var exception = Record.Exception(() => client.SimulateClosedForTest("rep-1", new Exception("closed")));
+
+        // Assert — the fire-and-forget restart schedule does not throw synchronously and
+        // the restart intent is logged against the rep
+        Assert.Null(exception);
+        loggerMock.Verify(
+            l => l.Log(
+                It.Is<LogLevel>(lvl => lvl == LogLevel.Information || lvl == LogLevel.Warning),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, _) => v.ToString()!.Contains("rep-1") && v.ToString()!.Contains("restart")),
+                It.IsAny<Exception?>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    // ─── AC-1: hub client logging routes through the injected logger factory ──
+
+    [Fact]
+    public void GivenADefaultHubConnectionFactory_WhenConstructedWithLoggerFactory_ThenBuildReturnsValidConnection()
+    {
+        // Arrange
+        var factory = new DefaultHubConnectionFactory(NullLoggerFactory.Instance);
+
+        // Act
+        var connection = factory.Build("http://localhost/hubs/rep", "token-1");
+
+        // Assert
+        Assert.NotNull(connection);
+    }
+
     // ─── Reconnect policy (unchanged) ─────────────────────────────────────────
 
     [Fact]
     public void GivenADefaultHubConnectionFactory_WhenBuilt_ThenReconnectIntervalsAreExponentialBackoff()
     {
         // Arrange
-        var factory = new DefaultHubConnectionFactory();
+        var factory = new DefaultHubConnectionFactory(NullLoggerFactory.Instance);
         var expectedIntervals = new[]
         {
             TimeSpan.Zero,

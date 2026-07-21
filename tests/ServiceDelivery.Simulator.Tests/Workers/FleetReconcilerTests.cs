@@ -36,6 +36,10 @@ public class FleetReconcilerTests
         fleetStateView = new Mock<IFleetStateView>();
         arrivalReporter = new Mock<IArrivalReporter>();
 
+        var signalRClient = new Mock<ISignalRClient>();
+        signalRClient.Setup(s => s.EnsureConnectedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
         var resolver = new VehicleDriveResolver();
         var registry = new YieldedRepRegistry();
         var gate = new RepOperationGate(registry);
@@ -43,7 +47,8 @@ public class FleetReconcilerTests
 
         return new FleetReconciler(
             apiClient.Object, coordinator.Object, resolver, gate,
-            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object, registry, options,
+            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object,
+            signalRClient.Object, registry, options,
             NullLogger<FleetReconciler>.Instance);
     }
 
@@ -98,11 +103,14 @@ public class FleetReconcilerTests
 
         var driver = new Mock<IVehiclePositionDriver>();
         var autoDecision = new Mock<IAutoDecisionEngine>();
+        var signalRClient = new Mock<ISignalRClient>();
+        signalRClient.Setup(s => s.EnsureConnectedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
         var registry = new YieldedRepRegistry();
         var reconciler = new FleetReconciler(
             apiClient.Object, new Mock<IFleetClaimCoordinator>().Object, new VehicleDriveResolver(),
             new RepOperationGate(registry), driver.Object, autoDecision.Object,
-            new Mock<IFleetStateView>().Object, new Mock<IArrivalReporter>().Object, registry,
+            new Mock<IFleetStateView>().Object, new Mock<IArrivalReporter>().Object, signalRClient.Object, registry,
             Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 }),
             NullLogger<FleetReconciler>.Instance);
 
@@ -141,11 +149,15 @@ public class FleetReconcilerTests
         var autoDecision = new Mock<IAutoDecisionEngine>();
         var fleetStateView = new Mock<IFleetStateView>();
         var arrivalReporter = new Mock<IArrivalReporter>();
+        var signalRClient = new Mock<ISignalRClient>();
+        signalRClient.Setup(s => s.EnsureConnectedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
 
         var registry = new YieldedRepRegistry();
         var reconciler = new FleetReconciler(
             apiClient.Object, coordinator.Object, new VehicleDriveResolver(), new RepOperationGate(registry),
-            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object, registry,
+            driver.Object, autoDecision.Object, fleetStateView.Object, arrivalReporter.Object,
+            signalRClient.Object, registry,
             Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 }),
             NullLogger<FleetReconciler>.Instance);
 
@@ -159,6 +171,70 @@ public class FleetReconcilerTests
 
         // Assert — position is still driven for the off-duty truck (AC-2 guardrail)
         driver.Verify(d => d.DriveAsync(offDutyTick, It.IsAny<VehicleDriveMode>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    // ─── BUG-053 AC-2: operated reps get a per-tick connection health check ─────
+
+    [Fact]
+    public async Task GivenAnOperatedRepWithClaimingRepId_WhenReconcilerTicks_ThenEnsureConnectedIsCalledForThatRep()
+    {
+        // Arrange — a non-human rep the simulator operates
+        var row = Row("V-001", "rep-1", RepState.Available, humanControlled: false);
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient.Setup(c => c.GetFleetStateAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { row });
+
+        var signalRClient = new Mock<ISignalRClient>();
+        signalRClient.Setup(s => s.EnsureConnectedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var registry = new YieldedRepRegistry();
+        var reconciler = new FleetReconciler(
+            apiClient.Object, new Mock<IFleetClaimCoordinator>().Object, new VehicleDriveResolver(),
+            new RepOperationGate(registry), new Mock<IVehiclePositionDriver>().Object,
+            new Mock<IAutoDecisionEngine>().Object, new Mock<IFleetStateView>().Object,
+            new Mock<IArrivalReporter>().Object, signalRClient.Object, registry,
+            Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 }),
+            NullLogger<FleetReconciler>.Instance);
+
+        // Act
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert
+        signalRClient.Verify(s => s.EnsureConnectedAsync("rep-1", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GivenAHumanControlledRep_WhenReconcilerTicks_ThenEnsureConnectedIsNotCalled()
+    {
+        // Arrange — a human controls this rep, so the simulator must not operate it
+        var humanRow = Row("V-001", "rep-1", RepState.EnRoute, humanControlled: true,
+            location: new RequesterLocation(41.6, -93.7));
+
+        var apiClient = new Mock<IBackendApiClient>();
+        apiClient.Setup(c => c.GetFleetStateAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { humanRow });
+
+        var signalRClient = new Mock<ISignalRClient>();
+        signalRClient.Setup(s => s.EnsureConnectedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var registry = new YieldedRepRegistry();
+        var reconciler = new FleetReconciler(
+            apiClient.Object, new Mock<IFleetClaimCoordinator>().Object, new VehicleDriveResolver(),
+            new RepOperationGate(registry), new Mock<IVehiclePositionDriver>().Object,
+            new Mock<IAutoDecisionEngine>().Object, new Mock<IFleetStateView>().Object,
+            new Mock<IArrivalReporter>().Object, signalRClient.Object, registry,
+            Options.Create(new SimulatorOptions { PositionUpdateIntervalSeconds = 3 }),
+            NullLogger<FleetReconciler>.Instance);
+
+        // Act
+        await reconciler.TickAsync(CancellationToken.None);
+
+        // Assert — the connection health check never fires for a human-controlled rep
+        signalRClient.Verify(
+            s => s.EnsureConnectedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

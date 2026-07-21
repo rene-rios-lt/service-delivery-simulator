@@ -21,6 +21,7 @@ public sealed class FleetReconciler : BackgroundService
     private readonly IAutoDecisionEngine _autoDecisionEngine;
     private readonly IFleetStateView _fleetStateView;
     private readonly IArrivalReporter _arrivalReporter;
+    private readonly ISignalRClient _signalRClient;
     private readonly IYieldedRepRegistry _yieldedReps;
     private readonly TimeSpan _tickInterval;
     private readonly ILogger<FleetReconciler> _logger;
@@ -34,6 +35,7 @@ public sealed class FleetReconciler : BackgroundService
         IAutoDecisionEngine autoDecisionEngine,
         IFleetStateView fleetStateView,
         IArrivalReporter arrivalReporter,
+        ISignalRClient signalRClient,
         IYieldedRepRegistry yieldedReps,
         IOptions<SimulatorOptions> options,
         ILogger<FleetReconciler> logger)
@@ -46,6 +48,7 @@ public sealed class FleetReconciler : BackgroundService
         _autoDecisionEngine = autoDecisionEngine;
         _fleetStateView = fleetStateView;
         _arrivalReporter = arrivalReporter;
+        _signalRClient = signalRClient;
         _yieldedReps = yieldedReps;
         _tickInterval = TimeSpan.FromSeconds(options.Value.PositionUpdateIntervalSeconds);
         _logger = logger;
@@ -73,6 +76,11 @@ public sealed class FleetReconciler : BackgroundService
 
             if (_operationGate.ShouldOperate(row))
             {
+                // BUG-053: heal any deaf RepHub connection for this operated rep within
+                // one tick, so a silently-dead websocket cannot let offers expire.
+                if (row.ClaimingRepId is not null)
+                    await _signalRClient.EnsureConnectedAsync(row.ClaimingRepId, cancellationToken);
+
                 await _autoDecisionEngine.RunAsync(row, cancellationToken);
 
                 // SIM-006: arrival reporting is gated automated-only on the same flag,

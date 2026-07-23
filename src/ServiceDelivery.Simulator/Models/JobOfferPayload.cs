@@ -9,4 +9,4 @@ public sealed record JobOfferPayload(
     double Latitude,
     double Longitude,
     double DistanceMiles,
-    int EtaMinutes);
+    double EtaMinutes);

@@ -179,6 +179,31 @@ public class BackendApiClientFleetStateTests
         Assert.Equal(expected, outcome);
     }
 
+    // ─── QUAL-029 AC-2: accept maps the HTTP status to an AcceptOutcome so the decision
+    // engine can tell a genuine 409 conflict (rep already busy / offer no longer Pending
+    // — decline immediately) apart from a transient failure (5xx — take no action),
+    // mirroring the ClaimVehicleAsync/ClaimOutcome theory above ───────────────────────
+    [Theory]
+    [InlineData(HttpStatusCode.OK, AcceptOutcome.Accepted)]
+    [InlineData(HttpStatusCode.NoContent, AcceptOutcome.Accepted)]
+    [InlineData(HttpStatusCode.Conflict, AcceptOutcome.Conflict)]
+    [InlineData(HttpStatusCode.InternalServerError, AcceptOutcome.Failed)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, AcceptOutcome.Failed)]
+    public async Task GivenAnAcceptResponseStatus_WhenAcceptJobOfferAsyncCalled_ThenOutcomeReflectsTheStatus(
+        HttpStatusCode status, AcceptOutcome expected)
+    {
+        // Arrange
+        var rep = Rep(token: "rep1-token");
+        var store = StoreWith(SimulatorIdentity());
+        var (client, _) = BuildClient(store.Object, _ => new HttpResponseMessage(status));
+
+        // Act
+        var outcome = await client.AcceptJobOfferAsync("offer-1", rep, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(expected, outcome);
+    }
+
     [Fact]
     public async Task GivenAvailableVehiclesAsObjects_WhenGetAvailableVehicleIdsAsyncCalled_ThenRepTokenIsUsedAndProjectedIdsReturned()
     {

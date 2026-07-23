@@ -33,6 +33,7 @@ public class JobOfferDecisionEngineTests
         public Mock<IDecisionRandomSource> Random { get; } = new();
         public Mock<IResponseDelay> Delay { get; } = new();
         public Mock<IIdentitySessionStore> Store { get; } = new();
+        public Mock<ILiveOfferGate> LiveOfferGate { get; } = new();
         public SimulatorOptions Options { get; } = new() { AutoDeclineRatePercent = 15 };
 
         public Harness()
@@ -46,11 +47,13 @@ public class JobOfferDecisionEngineTests
             Delay.Setup(d => d.DelayAsync(It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
             Store.Setup(s => s.Reps).Returns(new[] { Identity() });
+            // Default: the live-offer latch is free — the offer proceeds to a decision.
+            LiveOfferGate.Setup(g => g.TryAcquire(It.IsAny<string>())).Returns(true);
         }
 
         public JobOfferDecisionEngine Build() =>
             new(Api.Object, Gate.Object, FleetView.Object, Random.Object, Delay.Object,
-                Store.Object, Microsoft.Extensions.Options.Options.Create(Options),
+                Store.Object, LiveOfferGate.Object, Microsoft.Extensions.Options.Options.Create(Options),
                 NullLogger<JobOfferDecisionEngine>.Instance);
     }
 
@@ -134,6 +137,7 @@ public class JobOfferDecisionEngineTests
         var engine = new JobOfferDecisionEngine(
             harness.Api.Object, harness.Gate.Object, harness.FleetView.Object,
             harness.Random.Object, harness.Delay.Object, harness.Store.Object,
+            harness.LiveOfferGate.Object,
             Microsoft.Extensions.Options.Options.Create(new SimulatorOptions { AutoDeclineRatePercent = declineRate }),
             NullLogger<JobOfferDecisionEngine>.Instance);
         harness.Random.Setup(r => r.NextPercent()).Returns(randomPercent);
@@ -160,7 +164,7 @@ public class JobOfferDecisionEngineTests
             .Returns(Task.CompletedTask);
         harness.Api.Setup(a => a.AcceptJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
             .Callback(() => callOrder.Add("Accept"))
-            .Returns(Task.CompletedTask);
+            .Returns(Task.FromResult(AcceptOutcome.Accepted));
 
         // Act
         await harness.Build().HandleOfferAsync(RepId, Offer(), CancellationToken.None);
@@ -226,6 +230,90 @@ public class JobOfferDecisionEngineTests
         harness.Api.Verify(a => a.PostPositionAsync(It.IsAny<VehiclePosition>(), It.IsAny<CancellationToken>()), Times.Never);
         Assert.Single(harness.Api.Invocations.Where(i =>
             i.Method.Name is nameof(IBackendApiClient.AcceptJobOfferAsync) or nameof(IBackendApiClient.DeclineJobOfferAsync)));
+    }
+
+    // ─── QUAL-029 AC-1: a rep holds at most one live offer at a time ──────────────────
+
+    [Fact]
+    public async Task GivenARepWithLiveOfferInProgress_WhenSecondOfferArrives_ThenItIsIgnoredWithNoApiCall()
+    {
+        // Arrange — the latch is already held for this rep (an offer is in flight).
+        var harness = new Harness();
+        harness.LiveOfferGate.Setup(g => g.TryAcquire(RepId)).Returns(false);
+        var engine = harness.Build();
+
+        // Act
+        await engine.HandleOfferAsync(RepId, Offer(), CancellationToken.None);
+
+        // Assert — the second offer produces no accept and no decline.
+        harness.Api.Verify(a => a.AcceptJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
+        harness.Api.Verify(a => a.DeclineJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GivenARepWithNoActiveOffer_WhenOfferHandled_ThenGateIsReleasedAfterDecision()
+    {
+        // Arrange
+        var harness = new Harness();
+        var engine = harness.Build();
+
+        // Act
+        await engine.HandleOfferAsync(RepId, Offer(), CancellationToken.None);
+
+        // Assert — the latch is freed so the rep can receive a later offer.
+        harness.LiveOfferGate.Verify(g => g.Release(RepId), Times.Once);
+    }
+
+    [Fact]
+    public async Task GivenARepWithNoIdentityFound_WhenOfferHandled_ThenGateIsReleasedAfterEarlyReturn()
+    {
+        // Arrange — the latch is acquired but no operated identity matches, forcing the
+        // early return; the finally must still free the latch.
+        var harness = new Harness();
+        harness.Store.Setup(s => s.Reps).Returns(Array.Empty<RepIdentity>());
+        var engine = harness.Build();
+
+        // Act
+        await engine.HandleOfferAsync(RepId, Offer(), CancellationToken.None);
+
+        // Assert
+        harness.LiveOfferGate.Verify(g => g.Release(RepId), Times.Once);
+    }
+
+    // ─── QUAL-029 AC-2: a 409 on accept triggers an immediate decline ─────────────────
+
+    [Fact]
+    public async Task GivenAnAcceptRejectedWith409_WhenHandled_ThenDeclineJobOfferAsyncIsCalled()
+    {
+        // Arrange — the rep decides to accept, but the backend rejects it with a 409.
+        var harness = new Harness();
+        harness.Random.Setup(r => r.NextPercent()).Returns(99); // accept
+        harness.Api.Setup(a => a.AcceptJobOfferAsync("offer-1", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(AcceptOutcome.Conflict);
+        var engine = harness.Build();
+
+        // Act
+        await engine.HandleOfferAsync(RepId, Offer(), CancellationToken.None);
+
+        // Assert
+        harness.Api.Verify(a => a.DeclineJobOfferAsync("offer-1", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GivenAnAcceptReturningAccepted_WhenHandled_ThenDeclineIsNotCalled()
+    {
+        // Arrange — the accept succeeds; no compensating decline should follow.
+        var harness = new Harness();
+        harness.Random.Setup(r => r.NextPercent()).Returns(99); // accept
+        harness.Api.Setup(a => a.AcceptJobOfferAsync("offer-1", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(AcceptOutcome.Accepted);
+        var engine = harness.Build();
+
+        // Act
+        await engine.HandleOfferAsync(RepId, Offer(), CancellationToken.None);
+
+        // Assert
+        harness.Api.Verify(a => a.DeclineJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

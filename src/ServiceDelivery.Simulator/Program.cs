@@ -54,6 +54,10 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IFleetStateView, FleetStateView>();
         services.AddSingleton<IDecisionRandomSource, DefaultDecisionRandomSource>();
         services.AddSingleton<IResponseDelay, TaskResponseDelay>();
+        // QUAL-029 AC-1: the per-rep "one offer at a time" latch. SINGLETON because it
+        // holds in-flight-offer state across the concurrent SignalR handler threads that
+        // deliver offers for the reps this process operates.
+        services.AddSingleton<ILiveOfferGate, LiveOfferGate>();
         services.AddSingleton<IJobOfferDecisionEngine, JobOfferDecisionEngine>();
 
         // One VehicleWorker drive object per vehicle, fronted by the fleet-wide

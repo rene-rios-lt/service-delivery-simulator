@@ -20,6 +20,7 @@ public sealed class JobOfferDecisionEngine : IJobOfferDecisionEngine
     private readonly IDecisionRandomSource _randomSource;
     private readonly IResponseDelay _responseDelay;
     private readonly IIdentitySessionStore _sessionStore;
+    private readonly ILiveOfferGate _liveOfferGate;
     private readonly int _autoDeclineRatePercent;
     private readonly ILogger<JobOfferDecisionEngine> _logger;
 
@@ -30,6 +31,7 @@ public sealed class JobOfferDecisionEngine : IJobOfferDecisionEngine
         IDecisionRandomSource randomSource,
         IResponseDelay responseDelay,
         IIdentitySessionStore sessionStore,
+        ILiveOfferGate liveOfferGate,
         IOptions<SimulatorOptions> options,
         ILogger<JobOfferDecisionEngine> logger)
     {
@@ -39,36 +41,63 @@ public sealed class JobOfferDecisionEngine : IJobOfferDecisionEngine
         _randomSource = randomSource;
         _responseDelay = responseDelay;
         _sessionStore = sessionStore;
+        _liveOfferGate = liveOfferGate;
         _autoDeclineRatePercent = options.Value.AutoDeclineRatePercent;
         _logger = logger;
     }
 
     public async Task HandleOfferAsync(string repId, JobOfferPayload offer, CancellationToken cancellationToken)
     {
-        if (IsHumanControlled(repId))
+        // QUAL-029 AC-1: a rep holds at most one live offer. If the latch is already held
+        // an offer is in flight, so a concurrent second offer is ignored outright.
+        if (!_liveOfferGate.TryAcquire(repId))
         {
             _logger.LogInformation(
-                "Skipping offer {OfferId} for rep {RepId}: rep is human-controlled.", offer.OfferId, repId);
+                "Ignoring offer {OfferId} for rep {RepId}: an offer is already in progress.", offer.OfferId, repId);
             return;
         }
 
-        var identity = _sessionStore.Reps.FirstOrDefault(r => r.RepId == repId);
-        if (identity is null)
+        // try/finally guarantees the latch is freed on every exit path — normal decision,
+        // the identity-not-found early return, and cancellation.
+        try
         {
-            _logger.LogWarning(
-                "No operated identity found for rep {RepId}; cannot respond to offer {OfferId}.", repId, offer.OfferId);
-            return;
+            if (IsHumanControlled(repId))
+            {
+                _logger.LogInformation(
+                    "Skipping offer {OfferId} for rep {RepId}: rep is human-controlled.", offer.OfferId, repId);
+                return;
+            }
+
+            var identity = _sessionStore.Reps.FirstOrDefault(r => r.RepId == repId);
+            if (identity is null)
+            {
+                _logger.LogWarning(
+                    "No operated identity found for rep {RepId}; cannot respond to offer {OfferId}.", repId, offer.OfferId);
+                return;
+            }
+
+            var decline = _randomSource.NextPercent() < _autoDeclineRatePercent;
+
+            var delaySeconds = _randomSource.NextDelaySeconds(MinDelaySeconds, MaxDelaySeconds);
+            await _responseDelay.DelayAsync(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
+
+            if (decline)
+            {
+                await _apiClient.DeclineJobOfferAsync(offer.OfferId, identity, cancellationToken);
+                return;
+            }
+
+            // QUAL-029 AC-2: a 409 means the rep can no longer honour the offer (already
+            // busy, or the offer is no longer Pending) — decline it immediately so it is
+            // not left dangling.
+            var outcome = await _apiClient.AcceptJobOfferAsync(offer.OfferId, identity, cancellationToken);
+            if (outcome == AcceptOutcome.Conflict)
+                await _apiClient.DeclineJobOfferAsync(offer.OfferId, identity, cancellationToken);
         }
-
-        var decline = _randomSource.NextPercent() < _autoDeclineRatePercent;
-
-        var delaySeconds = _randomSource.NextDelaySeconds(MinDelaySeconds, MaxDelaySeconds);
-        await _responseDelay.DelayAsync(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
-
-        if (decline)
-            await _apiClient.DeclineJobOfferAsync(offer.OfferId, identity, cancellationToken);
-        else
-            await _apiClient.AcceptJobOfferAsync(offer.OfferId, identity, cancellationToken);
+        finally
+        {
+            _liveOfferGate.Release(repId);
+        }
     }
 
     // The simulator only connected RepHub for reps it operates, so absence of a row

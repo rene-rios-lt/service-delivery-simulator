@@ -76,8 +76,32 @@ public sealed class BackendApiClient : IBackendApiClient
                 response.StatusCode, rep.RepId);
     }
 
-    public Task AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken) =>
-        PostJobOfferActionAsync(offerId, "accept", rep, cancellationToken);
+    // QUAL-029 AC-2: unlike DeclineJobOfferAsync (which only logs non-2xx via the shared
+    // PostJobOfferActionAsync helper), accept must surface a 409 so the decision engine
+    // can decline the offer it can no longer honour. Direct HTTP call + status mapping
+    // mirrors ClaimVehicleAsync/ClaimOutcome.
+    public async Task<AcceptOutcome> AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken)
+    {
+        var token = await _sessionStore.GetValidTokenAsync(rep, cancellationToken);
+        using var request = BuildAuthorizedRequest(HttpMethod.Post, $"/job-offers/{offerId}/accept", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+
+        if (response.IsSuccessStatusCode)
+            return AcceptOutcome.Accepted;
+
+        if (response.StatusCode == HttpStatusCode.Conflict)
+        {
+            _logger.LogDebug(
+                "POST /job-offers/{OfferId}/accept returned 409 Conflict for rep {RepId}; declining the offer.",
+                offerId, rep.RepId);
+            return AcceptOutcome.Conflict;
+        }
+
+        _logger.LogError(
+            "POST /job-offers/{OfferId}/accept returned {StatusCode} for rep {RepId}.",
+            offerId, response.StatusCode, rep.RepId);
+        return AcceptOutcome.Failed;
+    }
 
     public Task DeclineJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken) =>
         PostJobOfferActionAsync(offerId, "decline", rep, cancellationToken);

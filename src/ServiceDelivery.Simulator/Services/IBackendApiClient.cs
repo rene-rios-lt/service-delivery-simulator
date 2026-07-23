@@ -5,7 +5,11 @@ namespace ServiceDelivery.Simulator.Services;
 public interface IBackendApiClient
 {
     Task PostPositionAsync(VehiclePosition position, CancellationToken cancellationToken);
-    Task AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken);
+
+    // QUAL-029 AC-2: returns an AcceptOutcome so the decision engine can detect a 409
+    // Conflict (rep already busy / offer no longer Pending) and decline immediately,
+    // mirroring ClaimVehicleAsync/ClaimOutcome. Accepted = the accept succeeded.
+    Task<AcceptOutcome> AcceptJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken);
     Task DeclineJobOfferAsync(string offerId, RepIdentity rep, CancellationToken cancellationToken);
 
     // SIM-006: the automated rep marks "I've Arrived" when its truck reaches the

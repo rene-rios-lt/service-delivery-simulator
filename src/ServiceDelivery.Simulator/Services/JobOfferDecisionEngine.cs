@@ -49,11 +49,27 @@ public sealed class JobOfferDecisionEngine : IJobOfferDecisionEngine
     public async Task HandleOfferAsync(string repId, JobOfferPayload offer, CancellationToken cancellationToken)
     {
         // QUAL-029 AC-1: a rep holds at most one live offer. If the latch is already held
-        // an offer is in flight, so a concurrent second offer is ignored outright.
+        // an offer is in flight, so the rep cannot take this concurrent second one.
         if (!_liveOfferGate.TryAcquire(repId))
         {
+            // BUG-062: relinquish it via decline, NOT a silent ignore. A rep with an
+            // undecided offer is still Available on the backend, so an ignored second offer
+            // sits Pending until ~60s expiry while the backend's idempotency guard blocks the
+            // request from re-matching to a free rep (the BUG-061 stuck-Pending class). Declining
+            // frees the request to re-match immediately — the same relinquish the 409 path does.
+            var busyIdentity = ResolveIdentity(repId);
+            if (busyIdentity is null)
+            {
+                _logger.LogWarning(
+                    "Concurrent offer {OfferId} for rep {RepId} cannot be relinquished: no operated identity found.",
+                    offer.OfferId, repId);
+                return;
+            }
+
             _logger.LogInformation(
-                "Ignoring offer {OfferId} for rep {RepId}: an offer is already in progress.", offer.OfferId, repId);
+                "Declining concurrent offer {OfferId} for rep {RepId}: an offer is already in progress.",
+                offer.OfferId, repId);
+            await _apiClient.DeclineJobOfferAsync(offer.OfferId, busyIdentity, cancellationToken);
             return;
         }
 
@@ -68,7 +84,7 @@ public sealed class JobOfferDecisionEngine : IJobOfferDecisionEngine
                 return;
             }
 
-            var identity = _sessionStore.Reps.FirstOrDefault(r => r.RepId == repId);
+            var identity = ResolveIdentity(repId);
             if (identity is null)
             {
                 _logger.LogWarning(
@@ -99,6 +115,10 @@ public sealed class JobOfferDecisionEngine : IJobOfferDecisionEngine
             _liveOfferGate.Release(repId);
         }
     }
+
+    // The operated identity the simulator uses to act as this rep, or null if none is held.
+    private RepIdentity? ResolveIdentity(string repId) =>
+        _sessionStore.Reps.FirstOrDefault(r => r.RepId == repId);
 
     // The simulator only connected RepHub for reps it operates, so absence of a row
     // is treated as operable (not human-controlled), not as a reason to skip.

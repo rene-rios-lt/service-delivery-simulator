@@ -235,7 +235,7 @@ public class JobOfferDecisionEngineTests
     // ─── QUAL-029 AC-1: a rep holds at most one live offer at a time ──────────────────
 
     [Fact]
-    public async Task GivenARepWithLiveOfferInProgress_WhenSecondOfferArrives_ThenItIsIgnoredWithNoApiCall()
+    public async Task GivenARepWithLiveOfferInProgress_WhenSecondOfferArrives_ThenItIsDeclinedSoTheRequestReMatchesImmediately()
     {
         // Arrange — the latch is already held for this rep (an offer is in flight).
         var harness = new Harness();
@@ -243,11 +243,33 @@ public class JobOfferDecisionEngineTests
         var engine = harness.Build();
 
         // Act
-        await engine.HandleOfferAsync(RepId, Offer(), CancellationToken.None);
+        await engine.HandleOfferAsync(RepId, Offer("offer-2"), CancellationToken.None);
 
-        // Assert — the second offer produces no accept and no decline.
+        // Assert — BUG-062: the concurrent offer must be RELINQUISHED via decline, not
+        // silently ignored. A rep with an undecided offer is still Available on the backend,
+        // so an ignored second offer sits Pending until ~60s expiry while the backend's
+        // idempotency guard blocks the request from re-matching to a free rep (the BUG-061
+        // stuck-Pending class). Declining re-matches the request immediately. It is never
+        // accepted (the rep is already committed to its live offer).
+        harness.Api.Verify(a => a.DeclineJobOfferAsync("offer-2", It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Once);
         harness.Api.Verify(a => a.AcceptJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GivenARepWithLiveOfferInProgressAndNoOperatedIdentity_WhenSecondOfferArrives_ThenNoApiCallIsMade()
+    {
+        // Arrange — latch held, but the rep has no operated identity to decline under.
+        var harness = new Harness();
+        harness.LiveOfferGate.Setup(g => g.TryAcquire(RepId)).Returns(false);
+        harness.Store.Setup(s => s.Reps).Returns(Array.Empty<RepIdentity>());
+        var engine = harness.Build();
+
+        // Act
+        await engine.HandleOfferAsync(RepId, Offer("offer-2"), CancellationToken.None);
+
+        // Assert — cannot decline without an identity; degrade to a no-op rather than throw.
         harness.Api.Verify(a => a.DeclineJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
+        harness.Api.Verify(a => a.AcceptJobOfferAsync(It.IsAny<string>(), It.IsAny<RepIdentity>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
